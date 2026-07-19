@@ -614,6 +614,25 @@ def _component_recipe(components):
     return ' + '.join(recipe)
 
 
+def _composite_display_name(metadata, raw_variables):
+    """Décrit un composite avec ses variables, dimensions et poids."""
+    if metadata.get('test_type') != 'composite' or not raw_variables:
+        return None
+    components = metadata.get('components', [])
+    variable_labels = []
+    for raw_variable in raw_variables:
+        dimensions = [
+            f"{component.get('dimension')}×{component.get('weight')}"
+            for component in components
+            if component.get('raw_variable') == raw_variable
+        ]
+        variable_label = str(raw_variable)
+        if dimensions:
+            variable_label += f'[{", ".join(dimensions)}]'
+        variable_labels.append(variable_label)
+    return f'composite / {" | ".join(variable_labels)}'
+
+
 def _period_metric_records(period_metrics):
     """Normalise les métriques par période sous forme de liste de dictionnaires."""
     if isinstance(period_metrics, pd.DataFrame):
@@ -637,11 +656,15 @@ def compare_backtest_results(results):
         raw_variable_weights = (
             result.get('raw_variable_weights') or summarize_component_weights(components)
         )
+        source_test_name = metadata.get('test_name', metadata.get('metric'))
+        test_name = (
+            _composite_display_name(metadata, raw_variables) or source_test_name
+        )
         row = {
             'test_path': test_path,
             'test_group': test_path.rsplit(' / ', 1)[0] if ' / ' in test_path else test_path,
             'test_type': metadata.get('test_type'),
-            'test_name': metadata.get('test_name', metadata.get('metric')),
+            'test_name': test_name,
             'metric': metadata.get('metric'),
             'benchmark': metadata.get('benchmark'),
             'percentile': metadata.get('percentile'),
@@ -805,24 +828,10 @@ def _resolve_performance_source(identifier, sources):
 def _performance_display_path(test_path, source):
     """Décrit un composite avec ses variables, dimensions et poids."""
     metadata = source.get('metadata', {})
-    if metadata.get('test_type') != 'composite':
-        return test_path
-    raw_variables = source.get('raw_variables', [])
-    if not raw_variables:
-        return test_path
-    components = metadata.get('components', [])
-    variable_labels = []
-    for raw_variable in raw_variables:
-        dimensions = [
-            f"{component.get('dimension')}×{component.get('weight')}"
-            for component in components
-            if component.get('raw_variable') == raw_variable
-        ]
-        variable_label = str(raw_variable)
-        if dimensions:
-            variable_label += f'[{", ".join(dimensions)}]'
-        variable_labels.append(variable_label)
-    return f'composite / {" | ".join(variable_labels)}'
+    return (
+        _composite_display_name(metadata, source.get('raw_variables', []))
+        or test_path
+    )
 
 
 def _performance_composition_table(selected_sources):
@@ -997,9 +1006,16 @@ def _build_analysis_tables_from_results(results):
 
     for test_path, result in _iter_backtest_results(results):
         metadata = result.get('metadata', {})
-        test_name = metadata.get('test_name') or metadata.get('metric') or test_path
-        weight_summary = summarize_component_weights(metadata.get('components', []))
-        for component in metadata.get('components', []):
+        components = metadata.get('components', [])
+        raw_variables = result.get('raw_variables') or list(dict.fromkeys(
+            component.get('raw_variable') for component in components
+        ))
+        source_test_name = metadata.get('test_name') or metadata.get('metric') or test_path
+        test_name = (
+            _composite_display_name(metadata, raw_variables) or source_test_name
+        )
+        weight_summary = summarize_component_weights(components)
+        for component in components:
             variable_summary = weight_summary.get(component.get('raw_variable'), {})
             composition_rows.append({
                 'test_path': test_path,
@@ -1170,6 +1186,23 @@ def reconstruct_backtest_analysis(results=None, export_dir=None, selections=None
         }
         source = 'disque'
 
+    composite_names = (
+        performance_composition.loc[
+            performance_composition['test_type'].eq('composite'),
+            ['test_path', 'display_path'],
+        ]
+        .drop_duplicates('test_path')
+        .set_index('test_path')['display_path']
+    )
+    for table_name, table in tables.items():
+        if table.empty or not {'test_path', 'test_name'}.issubset(table.columns):
+            continue
+        display_names = table['test_path'].map(composite_names)
+        if display_names.notna().any():
+            table = table.copy()
+            table.loc[display_names.notna(), 'test_name'] = display_names.dropna()
+            tables[table_name] = table
+
     metrics_by_period = _combine_total_and_period_metrics(
         tables['summary'], tables['period_metrics'],
     )
@@ -1312,8 +1345,15 @@ def export_backtest_results(results, output_dir, export_name=None, export_png=Tr
 
     for test_path, result in flattened:
         metadata = copy.deepcopy(result.get('metadata', {}))
-        test_name = metadata.get('test_name') or metadata.get('metric') or test_path
-        file_stem = _safe_filename(f'{test_path}_{test_name}')
+        source_test_name = metadata.get('test_name') or metadata.get('metric') or test_path
+        components = metadata.get('components', [])
+        raw_variables = result.get('raw_variables') or list(dict.fromkeys(
+            component.get('raw_variable') for component in components
+        ))
+        test_name = (
+            _composite_display_name(metadata, raw_variables) or source_test_name
+        )
+        file_stem = _safe_filename(f'{test_path}_{source_test_name}')
         performance_path = data_dir / f'{file_stem}_performance.csv'
         ratios_path = data_dir / f'{file_stem}_ratios.csv'
         top_holdings_path = holdings_dir / f'{file_stem}_top.csv'
@@ -1330,8 +1370,8 @@ def export_backtest_results(results, output_dir, export_name=None, export_png=Tr
         if figure is not None:
             figure_jobs.append((figure, html_path, png_path))
 
-        weight_summary = summarize_component_weights(metadata.get('components', []))
-        for component in metadata.get('components', []):
+        weight_summary = summarize_component_weights(components)
+        for component in components:
             variable_summary = weight_summary.get(component.get('raw_variable'), {})
             composition_rows.append({
                 'test_path': test_path,
