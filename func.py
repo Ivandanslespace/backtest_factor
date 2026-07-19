@@ -960,6 +960,204 @@ def calculate_performance_ratios(performance, benchmark_column='Benchmark'):
     return ratios
 
 
+def _build_analysis_tables_from_results(results):
+    """Construit en mémoire les mêmes tables d'analyse que l'export CSV."""
+    summary = compare_backtest_results(results)
+    composition_rows = []
+    classic_metric_rows = []
+    period_metric_rows = []
+
+    for test_path, result in _iter_backtest_results(results):
+        metadata = result.get('metadata', {})
+        test_name = metadata.get('test_name') or metadata.get('metric') or test_path
+        weight_summary = summarize_component_weights(metadata.get('components', []))
+        for component in metadata.get('components', []):
+            variable_summary = weight_summary.get(component.get('raw_variable'), {})
+            composition_rows.append({
+                'test_path': test_path,
+                'test_name': test_name,
+                **component,
+                'raw_variable_total_weight': variable_summary.get('total_weight'),
+                'raw_variable_absolute_weight': variable_summary.get('absolute_weight'),
+                'raw_variable_absolute_weight_share': variable_summary.get(
+                    'absolute_weight_share'
+                ),
+            })
+        for portfolio, metrics in result.get('classic_metrics', {}).items():
+            for metric, value in metrics.items():
+                classic_metric_rows.append({
+                    'test_path': test_path,
+                    'test_name': test_name,
+                    'portfolio': portfolio,
+                    'metric': metric,
+                    'value': value,
+                })
+        for period_row in _period_metric_records(result.get('period_metrics')):
+            period_metric_rows.append({
+                'test_path': test_path,
+                'test_name': test_name,
+                'test_type': metadata.get('test_type'),
+                'metric': metadata.get('metric'),
+                **period_row,
+            })
+
+    period_metrics = pd.DataFrame(period_metric_rows)
+    if not period_metrics.empty:
+        for metric in ('active_cagr', 'top_worst_cagr', 'top_sharpe_ratio'):
+            if metric not in period_metrics.columns:
+                continue
+            period_metrics[f'{metric}_rank_global'] = period_metrics.groupby(
+                'period_id', dropna=False,
+            )[metric].rank(ascending=False, method='min', na_option='bottom')
+            period_metrics[f'{metric}_rank_within_type'] = period_metrics.groupby(
+                ['period_id', 'test_type'], dropna=False,
+            )[metric].rank(ascending=False, method='min', na_option='bottom')
+    return {
+        'summary': summary,
+        'classic_metrics': pd.DataFrame(classic_metric_rows),
+        'period_metrics': period_metrics,
+        'signal_composition': pd.DataFrame(composition_rows),
+    }
+
+
+def _combine_total_and_period_metrics(summary, period_metrics):
+    """Réunit la période totale et les sous-périodes dans une table comparable."""
+    total_rows = []
+
+    def relative_cagr(portfolio_return, reference_return):
+        if pd.isna(portfolio_return) or pd.isna(reference_return):
+            return float('nan')
+        if 1 + reference_return <= 0:
+            return float('nan')
+        return (1 + portfolio_return) / (1 + reference_return) - 1
+
+    for _, summary_row in summary.iterrows():
+        observation_count = summary_row.get('observation_count')
+        years = (
+            max((observation_count - 1) / 252, 0)
+            if pd.notna(observation_count) else float('nan')
+        )
+        total_row = {
+            'scope': 'total',
+            'test_path': summary_row.get('test_path'),
+            'test_name': summary_row.get('test_name'),
+            'test_type': summary_row.get('test_type'),
+            'metric': summary_row.get('metric'),
+            'period_id': 'total',
+            'period_label': 'Période totale',
+            'requested_start_date': summary_row.get('start_date'),
+            'requested_end_date': None,
+            'actual_start_date': None,
+            'actual_end_date': None,
+            'observation_count': observation_count,
+            'years': years,
+            'top_cagr': summary_row.get('top_annualized_return'),
+            'worst_cagr': summary_row.get('worst_annualized_return'),
+            'bench_cagr': summary_row.get('bench_annualized_return'),
+            'active_cagr': relative_cagr(
+                summary_row.get('top_annualized_return'),
+                summary_row.get('bench_annualized_return'),
+            ),
+            'top_worst_cagr': relative_cagr(
+                summary_row.get('top_annualized_return'),
+                summary_row.get('worst_annualized_return'),
+            ),
+            'robust_score': summary_row.get('robust_score'),
+            'top_bench_ratio': summary_row.get('top_bench_ratio'),
+            'top_worst_ratio': summary_row.get('top_worst_ratio'),
+            'active_max_drawdown': summary_row.get('active_max_drawdown'),
+            'tracking_error_annualized': summary_row.get('tracking_error_annualized'),
+            'min_rolling_3y_cagr': summary_row.get('min_rolling_3y_cagr'),
+            'raw_variables': summary_row.get('raw_variables'),
+            'raw_variable_weights': summary_row.get('raw_variable_weights'),
+            'recipe': summary_row.get('recipe'),
+        }
+        total_row.update({
+            column: summary_row.get(column) for column in CLASSIC_METRIC_COLUMNS
+        })
+        total_rows.append(total_row)
+
+    total_metrics = pd.DataFrame(total_rows)
+    subperiod_metrics = period_metrics.copy()
+    if not subperiod_metrics.empty:
+        subperiod_metrics.insert(0, 'scope', 'subperiod')
+    combined = pd.concat(
+        [total_metrics, subperiod_metrics],
+        ignore_index=True,
+        sort=False,
+    )
+    if combined.empty:
+        return combined
+    for metric in ('active_cagr', 'top_worst_cagr', 'top_sharpe_ratio'):
+        if metric not in combined.columns:
+            continue
+        combined[f'{metric}_rank_global'] = combined.groupby(
+            'period_id', dropna=False,
+        )[metric].rank(ascending=False, method='min', na_option='bottom')
+        combined[f'{metric}_rank_within_type'] = combined.groupby(
+            ['period_id', 'test_type'], dropna=False,
+        )[metric].rank(ascending=False, method='min', na_option='bottom')
+    scope_order = combined['scope'].map({'total': 0, 'subperiod': 1}).fillna(2)
+    return combined.assign(_scope_order=scope_order).sort_values(
+        ['_scope_order', 'period_id', 'test_type', 'test_name'],
+    ).drop(columns='_scope_order').reset_index(drop=True)
+
+
+def reconstruct_backtest_analysis(results=None, export_dir=None, selections=None,
+                                  portfolios=('Top',), performance_save_path=None):
+    """Restaure performances, scores et métriques totales ou par période."""
+    performance, performance_composition = combine_backtest_performances(
+        results=results,
+        export_dir=export_dir,
+        selections=selections,
+        portfolios=portfolios,
+        save_path=performance_save_path,
+        return_composition=True,
+    )
+
+    if results is not None:
+        tables = _build_analysis_tables_from_results(results)
+        source = 'mémoire'
+    else:
+        if export_dir is None:
+            raise ValueError('Indiquez export_dir lorsque les résultats mémoire sont absents.')
+        export_dir = Path(export_dir)
+        table_files = {
+            'summary': 'backtest_summary.csv',
+            'classic_metrics': 'classic_metrics.csv',
+            'period_metrics': 'period_metrics.csv',
+            'signal_composition': 'signal_composition.csv',
+        }
+        missing_files = [
+            filename for filename in table_files.values()
+            if not (export_dir / filename).exists()
+        ]
+        if missing_files:
+            raise FileNotFoundError(
+                f'Tables exportées absentes dans {export_dir} : {missing_files}'
+            )
+        tables = {
+            key: pd.read_csv(export_dir / filename)
+            for key, filename in table_files.items()
+        }
+        source = 'disque'
+
+    metrics_by_period = _combine_total_and_period_metrics(
+        tables['summary'], tables['period_metrics'],
+    )
+    return {
+        'source': source,
+        'performance': performance,
+        'performance_composition': performance_composition,
+        'summary': tables['summary'],
+        'total_metrics': tables['summary'],
+        'classic_metrics': tables['classic_metrics'],
+        'period_metrics': tables['period_metrics'],
+        'metrics_by_period': metrics_by_period,
+        'signal_composition': tables['signal_composition'],
+    }
+
+
 def plot_performance_comparison(performance, ratios, benchmark_column='Benchmark',
                                 title='Comparaison des performances',
                                 save_path=None, show_plot=True):
@@ -1165,10 +1363,12 @@ def export_backtest_results(results, output_dir, export_name=None, export_png=Tr
             period_metrics[f'{metric}_rank_within_type'] = period_metrics.groupby(
                 ['period_id', 'test_type'], dropna=False,
             )[metric].rank(ascending=False, method='min', na_option='bottom')
+    metrics_by_period = _combine_total_and_period_metrics(summary, period_metrics)
     summary.to_csv(export_dir / 'backtest_summary.csv', index=False)
     composition.to_csv(export_dir / 'signal_composition.csv', index=False)
     classic_metrics.to_csv(export_dir / 'classic_metrics.csv', index=False)
     period_metrics.to_csv(export_dir / 'period_metrics.csv', index=False)
+    metrics_by_period.to_csv(export_dir / 'metrics_by_period.csv', index=False)
     with (export_dir / 'backtest_registry.json').open('w', encoding='utf-8') as registry_file:
         json.dump(registry, registry_file, ensure_ascii=False, indent=2, default=str)
 
@@ -1190,5 +1390,6 @@ def export_backtest_results(results, output_dir, export_name=None, export_png=Tr
         'composition': composition,
         'classic_metrics': classic_metrics,
         'period_metrics': period_metrics,
+        'metrics_by_period': metrics_by_period,
         'registry': registry,
     }
