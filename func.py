@@ -723,6 +723,7 @@ def _load_saved_performances(export_dir):
         for entry in registry:
             test_path = entry.get('test_path')
             metadata = entry.get('metadata', {})
+            components = metadata.get('components', [])
             test_name = metadata.get('test_name') or metadata.get('metric') or test_path
             relative_path = entry.get('files', {}).get('performance')
             if relative_path:
@@ -736,6 +737,14 @@ def _load_saved_performances(export_dir):
             registered_files.add(resolved_path)
             sources[test_path] = {
                 'test_name': test_name,
+                'metadata': metadata,
+                'raw_variables': entry.get('raw_variables') or list(dict.fromkeys(
+                    component.get('raw_variable') for component in components
+                )),
+                'raw_variable_weights': (
+                    entry.get('raw_variable_weights')
+                    or summarize_component_weights(components)
+                ),
                 'performance': _read_performance_csv(performance_path),
                 'origin': str(performance_path),
             }
@@ -747,6 +756,9 @@ def _load_saved_performances(export_dir):
             test_path = performance_path.stem.removesuffix('_performance')
             sources[test_path] = {
                 'test_name': test_path,
+                'metadata': {},
+                'raw_variables': [],
+                'raw_variable_weights': {},
                 'performance': _read_performance_csv(performance_path),
                 'origin': str(performance_path),
             }
@@ -773,13 +785,72 @@ def _resolve_performance_source(identifier, sources):
     raise KeyError(f'Test introuvable « {identifier} ». Tests disponibles : {available}')
 
 
+def _performance_display_path(test_path, source):
+    """Décrit un composite avec ses variables, dimensions et poids."""
+    metadata = source.get('metadata', {})
+    if metadata.get('test_type') != 'composite':
+        return test_path
+    raw_variables = source.get('raw_variables', [])
+    if not raw_variables:
+        return test_path
+    components = metadata.get('components', [])
+    variable_labels = []
+    for raw_variable in raw_variables:
+        dimensions = [
+            f"{component.get('dimension')}×{component.get('weight')}"
+            for component in components
+            if component.get('raw_variable') == raw_variable
+        ]
+        variable_label = str(raw_variable)
+        if dimensions:
+            variable_label += f'[{", ".join(dimensions)}]'
+        variable_labels.append(variable_label)
+    return f'composite / {" | ".join(variable_labels)}'
+
+
+def _performance_composition_table(selected_sources):
+    """Construit la composition détaillée des tests présents dans la comparaison."""
+    rows = []
+    seen_paths = set()
+    for test_path, source in selected_sources:
+        if test_path in seen_paths:
+            continue
+        seen_paths.add(test_path)
+        metadata = source.get('metadata', {})
+        components = metadata.get('components', [])
+        weight_summary = (
+            source.get('raw_variable_weights')
+            or summarize_component_weights(components)
+        )
+        for component in components:
+            raw_variable = component.get('raw_variable')
+            variable_summary = weight_summary.get(raw_variable, {})
+            rows.append({
+                'display_path': _performance_display_path(test_path, source),
+                'test_path': test_path,
+                'test_type': metadata.get('test_type'),
+                'test_name': source.get('test_name'),
+                **component,
+                'raw_variable_total_weight': variable_summary.get('total_weight'),
+                'raw_variable_absolute_weight': variable_summary.get('absolute_weight'),
+                'raw_variable_absolute_weight_share': variable_summary.get(
+                    'absolute_weight_share'
+                ),
+            })
+    return pd.DataFrame(rows)
+
+
 def combine_backtest_performances(results=None, export_dir=None, selections=None,
-                                  portfolios=('Top',), save_path=None):
+                                  portfolios=('Top',), save_path=None,
+                                  return_composition=False):
     """Combine des performances en mémoire et complète les absences depuis le disque.
 
     ``selections`` associe le nom final d'une colonne à un couple
     ``(chemin_ou_nom_du_test, portefeuille)``. Sans sélection, tous les tests
-    disponibles sont combinés pour les portefeuilles demandés.
+    disponibles sont combinés pour les portefeuilles demandés. Pour un composite,
+    le libellé automatique contient directement toutes ses variables brutes.
+    Avec ``return_composition=True``, la fonction renvoie aussi la table détaillée
+    des dimensions, directions, dénominateurs et poids.
     """
     sources = _load_saved_performances(export_dir) if export_dir is not None else {}
     if results is not None:
@@ -788,8 +859,17 @@ def combine_backtest_performances(results=None, export_dir=None, selections=None
             if not isinstance(performance, pd.DataFrame) or performance.empty:
                 continue
             metadata = result.get('metadata', {})
+            components = metadata.get('components', [])
             sources[test_path] = {
                 'test_name': metadata.get('test_name') or metadata.get('metric') or test_path,
+                'metadata': metadata,
+                'raw_variables': result.get('raw_variables') or list(dict.fromkeys(
+                    component.get('raw_variable') for component in components
+                )),
+                'raw_variable_weights': (
+                    result.get('raw_variable_weights')
+                    or summarize_component_weights(components)
+                ),
                 'performance': performance.copy(),
                 'origin': 'mémoire',
             }
@@ -797,11 +877,17 @@ def combine_backtest_performances(results=None, export_dir=None, selections=None
         raise ValueError('Aucune performance disponible en mémoire ou dans le dossier exporté.')
 
     series = {}
+    selected_sources = []
     if selections is None:
         for test_path, source in sources.items():
+            display_path = _performance_display_path(test_path, source)
             for portfolio in portfolios:
                 if portfolio in source['performance'].columns:
-                    series[f'{test_path} | {portfolio}'] = source['performance'][portfolio]
+                    label = f'{display_path} | {portfolio}'
+                    if label in series:
+                        label = f'{label} [{source.get("test_name")}]'
+                    series[label] = source['performance'][portfolio]
+                    selected_sources.append((test_path, source))
     else:
         for label, selection in selections.items():
             if isinstance(selection, str):
@@ -813,23 +899,27 @@ def combine_backtest_performances(results=None, export_dir=None, selections=None
                     raise ValueError(
                         f'Sélection invalide pour « {label} » : utilisez (test, portefeuille).'
                     ) from error
-            _, source = _resolve_performance_source(identifier, sources)
+            test_path, source = _resolve_performance_source(identifier, sources)
             if portfolio not in source['performance'].columns:
                 raise KeyError(
                     f'Portefeuille « {portfolio} » absent pour le test « {identifier} ». '
                     f'Colonnes disponibles : {", ".join(source["performance"].columns)}'
                 )
             series[label] = source['performance'][portfolio]
+            selected_sources.append((test_path, source))
 
     if not series:
         raise ValueError('Aucune série ne correspond aux portefeuilles demandés.')
     combined = pd.concat(series, axis=1).sort_index()
     combined.index.name = 'Date'
+    composition = _performance_composition_table(selected_sources)
     if save_path is not None:
         save_path = Path(save_path)
         save_path.parent.mkdir(parents=True, exist_ok=True)
         combined.to_csv(save_path, index=True)
         print(f'Comparaison des performances exportée : {save_path}')
+    if return_composition:
+        return combined, composition
     return combined
 
 
