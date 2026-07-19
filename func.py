@@ -940,22 +940,50 @@ def combine_backtest_performances(results=None, export_dir=None, selections=None
     return combined
 
 
-def calculate_performance_ratios(performance, benchmark_column='Benchmark'):
-    """Calcule séparément les ratios de chaque courbe par rapport au benchmark."""
+def calculate_performance_ratios(performance, benchmark_column='Benchmark',
+                                 ratio_definitions=None):
+    """Calcule les ratios demandés sans construire de figure."""
     if not isinstance(performance, pd.DataFrame) or performance.empty:
         raise ValueError('La table de performances doit être un DataFrame non vide.')
-    if benchmark_column not in performance.columns:
-        raise KeyError(
-            f'Benchmark « {benchmark_column} » absent. '
-            f'Colonnes disponibles : {", ".join(performance.columns)}'
-        )
-    comparison_columns = [
-        column for column in performance.columns if column != benchmark_column
-    ]
-    if not comparison_columns:
-        raise ValueError('Ajoutez au moins une performance à comparer au benchmark.')
-    benchmark = performance[benchmark_column].replace(0, np.nan)
-    ratios = performance[comparison_columns].div(benchmark, axis=0)
+    if ratio_definitions is None:
+        if benchmark_column not in performance.columns:
+            raise KeyError(
+                f'Benchmark « {benchmark_column} » absent. '
+                f'Colonnes disponibles : {", ".join(performance.columns)}'
+            )
+        comparison_columns = [
+            column for column in performance.columns if column != benchmark_column
+        ]
+        if not comparison_columns:
+            raise ValueError('Ajoutez au moins une performance à comparer au benchmark.')
+        benchmark = performance[benchmark_column].replace(0, np.nan)
+        ratios = performance[comparison_columns].div(benchmark, axis=0)
+    else:
+        if not ratio_definitions:
+            raise ValueError('Ajoutez au moins une définition de ratio.')
+        ratio_series = {}
+        for label, definition in ratio_definitions.items():
+            try:
+                numerator, denominator = definition
+            except (TypeError, ValueError) as error:
+                raise ValueError(
+                    f'Définition invalide pour « {label} » : utilisez '
+                    '(numérateur, dénominateur).'
+                ) from error
+            missing_columns = [
+                column for column in (numerator, denominator)
+                if column not in performance.columns
+            ]
+            if missing_columns:
+                raise KeyError(
+                    f'Colonnes absentes pour le ratio « {label} » : '
+                    f'{missing_columns}'
+                )
+            ratio_series[label] = (
+                performance[numerator]
+                / performance[denominator].replace(0, np.nan)
+            )
+        ratios = pd.DataFrame(ratio_series, index=performance.index)
     ratios.index.name = performance.index.name
     return ratios
 
@@ -1164,13 +1192,6 @@ def plot_performance_comparison(performance, ratios, benchmark_column='Benchmark
     """Trace en Plotly des performances et ratios déjà calculés."""
     if benchmark_column not in performance.columns:
         raise KeyError(f'Benchmark « {benchmark_column} » absent des performances.')
-    missing_ratio_columns = [
-        column for column in ratios.columns if column not in performance.columns
-    ]
-    if missing_ratio_columns:
-        raise KeyError(
-            f'Ratios sans performance correspondante : {missing_ratio_columns}'
-        )
 
     fig = make_subplots(
         rows=2,
@@ -1179,7 +1200,7 @@ def plot_performance_comparison(performance, ratios, benchmark_column='Benchmark
         vertical_spacing=0.1,
         subplot_titles=(
             'Performance cumulée',
-            f'Ratios par rapport à {benchmark_column}',
+            'Ratios relatifs',
         ),
     )
     non_benchmark_columns = [
@@ -1208,15 +1229,32 @@ def plot_performance_comparison(performance, ratios, benchmark_column='Benchmark
             col=1,
         )
 
-    for column in ratios.columns:
+    for index, column in enumerate(ratios.columns):
+        is_legacy_benchmark_ratio = column in performance.columns
+        ratio_name = (
+            f'{column} / {benchmark_column}'
+            if is_legacy_benchmark_ratio else column
+        )
+        numerator = ratio_name.split(' / ', 1)[0]
         fig.add_trace(
             go.Scatter(
                 x=ratios.index,
                 y=ratios[column],
                 mode='lines',
-                name=f'{column} / {benchmark_column}',
-                legendgroup=column,
-                line=dict(color=color_map.get(column), width=2),
+                name=ratio_name,
+                legendgroup=ratio_name,
+                line=dict(
+                    color=color_map.get(
+                        numerator,
+                        qualitative.Plotly[index % len(qualitative.Plotly)],
+                    ),
+                    width=2,
+                    dash=(
+                        'solid'
+                        if ratio_name.endswith(f' / {benchmark_column}')
+                        else 'dash'
+                    ),
+                ),
             ),
             row=2,
             col=1,
