@@ -1,0 +1,17 @@
+# Données locales volumineuses
+*.parquet
+
+# Résultats générés par les backtests
+/exports/
+
+# Caches Python
+__pycache__/
+*.py[cod]
+
+# Fichiers temporaires Jupyter
+.ipynb_checkpoints/
+
+# Environnements et secrets locaux
+.venv/
+venv/
+.env
