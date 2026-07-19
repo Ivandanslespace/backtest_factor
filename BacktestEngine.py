@@ -2131,11 +2131,8 @@ class PtfBuilder:
             rows.append(row)
         return pd.DataFrame(rows)
 
-    def backtest_plot_top_vs_bottom(
-            self, builder_bottom, title=None,
-            save_path="comparison.html", show_plot=True,
-            period_breakpoints=None):
-        """Compare les portefeuilles Top et Worst avec un benchmark commun."""
+    def calculate_top_vs_bottom_results(self, builder_bottom, period_breakpoints=None):
+        """Calcule les performances et les métriques sans construire de figure."""
         if self.perf_ptf is None:
             if self.sec_list_historical is None:
                 self.generic_histo_seclist(
@@ -2163,43 +2160,61 @@ class PtfBuilder:
         robust_score, top_bench_ratio, top_worst_ratio = self._calculate_robust_score(
             perf_top, perf_bottom, perf_bench,
         )
-        display_title = title if title else 'Factor'
-        print(
-            f"Results for {display_title}: "
-            f"Robust Score: {robust_score:.4f}, "
-            f"Top/Bench: {top_bench_ratio:.4f}, "
-            f"Top/Worst: {top_worst_ratio:.4f}"
-        )
-
-        df_plot = pd.concat([perf_top, perf_bottom, perf_bench], axis=1).dropna()
-        df_plot.columns = ['Top', 'Worst', 'Bench']
-        ratio_top = df_plot['Top'] / df_plot['Bench']
-        ratio_worst = df_plot['Worst'] / df_plot['Bench']
-        ratio_top_worst = df_plot['Top'] / df_plot['Worst']
-        ratio_plot = pd.DataFrame({
-            'Top/Bench': ratio_top,
-            'Worst/Bench': ratio_worst,
-            'Top/Worst': ratio_top_worst,
+        performance = pd.concat([perf_top, perf_bottom, perf_bench], axis=1).dropna()
+        performance.columns = ['Top', 'Worst', 'Bench']
+        ratios = pd.DataFrame({
+            'Top/Bench': performance['Top'] / performance['Bench'],
+            'Worst/Bench': performance['Worst'] / performance['Bench'],
+            'Top/Worst': performance['Top'] / performance['Worst'],
         })
         classic_metrics = {
             portfolio: self._calculate_classic_metrics(
-                df_plot[portfolio], benchmark=df_plot['Bench'],
+                performance[portfolio], benchmark=performance['Bench'],
             )
             for portfolio in ('Top', 'Worst', 'Bench')
         }
-        period_metrics = self._calculate_period_metrics(df_plot, period_breakpoints)
+        period_metrics = self._calculate_period_metrics(performance, period_breakpoints)
+
+        result = {
+            'robust_score': robust_score,
+            'top_bench_ratio': top_bench_ratio,
+            'top_worst_ratio': top_worst_ratio,
+            'performance': performance,
+            'ratios': ratios,
+            'classic_metrics': classic_metrics,
+            'period_metrics': period_metrics,
+        }
+        result.update(getattr(self, 'robust_metrics', {}))
+        for portfolio, metrics in classic_metrics.items():
+            result.update({
+                f'{portfolio.lower()}_{metric}': value
+                for metric, value in metrics.items()
+            })
+        return result
+
+
+    def plot_top_vs_bottom_results(
+            self, result, title=None,
+            save_path="comparison.html", show_plot=True):
+        """Construit uniquement la figure à partir de résultats déjà calculés."""
+        performance = result['performance']
+        ratios = result['ratios']
+        period_metrics = result.get('period_metrics', pd.DataFrame())
+        robust_score = result.get('robust_score', float('nan'))
+        top_bench_ratio = result.get('top_bench_ratio', float('nan'))
+        top_worst_ratio = result.get('top_worst_ratio', float('nan'))
 
         fig = make_subplots(
             rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.1,
-            subplot_titles=('Cumulative Performance', 'Ratio vs Benchmark'),
+            subplot_titles=('Performance cumulée', 'Ratios relatifs'),
         )
 
         colors = {'Top': 'blue', 'Worst': 'orange', 'Bench': 'black'}
-        for column in df_plot.columns:
+        for column in performance.columns:
             fig.add_trace(
                 go.Scatter(
-                    x=df_plot.index,
-                    y=df_plot[column],
+                    x=performance.index,
+                    y=performance[column],
                     mode='lines',
                     name=column,
                     line=dict(width=2, color=colors[column]),
@@ -2207,32 +2222,27 @@ class PtfBuilder:
                 row=1, col=1,
             )
 
-        fig.add_trace(
-            go.Scatter(
-                x=df_plot.index, y=ratio_top, mode='lines',
-                name='Ratio Top/Bench', line=dict(width=2, color='blue'),
-            ),
-            row=2, col=1,
-        )
-        fig.add_trace(
-            go.Scatter(
-                x=df_plot.index, y=ratio_worst, mode='lines',
-                name='Ratio Worst/Bench', line=dict(width=2, color='orange'),
-            ),
-            row=2, col=1,
-        )
-        fig.add_trace(
-            go.Scatter(
-                x=df_plot.index, y=ratio_top_worst, mode='lines',
-                name='Ratio Top/Worst', line=dict(width=2, color='green'),
-            ),
-            row=2, col=1,
-        )
+        ratio_colors = {
+            'Top/Bench': 'blue',
+            'Worst/Bench': 'orange',
+            'Top/Worst': 'green',
+        }
+        for column in ratios.columns:
+            fig.add_trace(
+                go.Scatter(
+                    x=ratios.index,
+                    y=ratios[column],
+                    mode='lines',
+                    name=f'Ratio {column}',
+                    line=dict(width=2, color=ratio_colors.get(column)),
+                ),
+                row=2, col=1,
+            )
 
         fig.update_layout(
             title=(
-                f"{title if title else 'Top vs Worst Comparison'} | "
-                f"Robust Score: {robust_score:.4f} | "
+                f"{title if title else 'Comparaison Top/Worst'} | "
+                f"Score de robustesse : {robust_score:.4f} | "
                 f"T/B: {top_bench_ratio:.4f} | "
                 f"T/W: {top_worst_ratio:.4f}"
             ),
@@ -2257,10 +2267,10 @@ class PtfBuilder:
                 return f'{value:.2%}' if pd.notna(value) else 'n.d.'
 
             period_title = (
-                f"{title if title else 'Top vs Worst Comparison'} | "
+                f"{title if title else 'Comparaison Top/Worst'} | "
                 f"{period_row['period_label']} | "
                 f"Top CAGR: {format_percentage(period_row['top_cagr'])} | "
-                f"Active CAGR: {format_percentage(period_row['active_cagr'])} | "
+                f"CAGR actif: {format_percentage(period_row['active_cagr'])} | "
                 f"Top/Worst CAGR: {format_percentage(period_row['top_worst_cagr'])}"
             )
             period_buttons.append({
@@ -2302,21 +2312,29 @@ class PtfBuilder:
             fig.write_html(save_path)
         if show_plot:
             fig.show()
+        return fig
 
-        result = {
-            'figure': fig,
-            'robust_score': robust_score,
-            'top_bench_ratio': top_bench_ratio,
-            'top_worst_ratio': top_worst_ratio,
-            'performance': df_plot,
-            'ratios': ratio_plot,
-            'classic_metrics': classic_metrics,
-            'period_metrics': period_metrics,
-        }
-        result.update(getattr(self, 'robust_metrics', {}))
-        for portfolio, metrics in classic_metrics.items():
-            result.update({
-                f'{portfolio.lower()}_{metric}': value
-                for metric, value in metrics.items()
-            })
+
+    def backtest_plot_top_vs_bottom(
+            self, builder_bottom, title=None,
+            save_path="comparison.html", show_plot=True,
+            period_breakpoints=None):
+        """Conserve l'ancien point d'entrée en séparant calcul et affichage."""
+        result = self.calculate_top_vs_bottom_results(
+            builder_bottom=builder_bottom,
+            period_breakpoints=period_breakpoints,
+        )
+        display_title = title if title else 'Facteur'
+        print(
+            f"Résultats pour {display_title} : "
+            f"score de robustesse {result['robust_score']:.4f}, "
+            f"Top/Bench {result['top_bench_ratio']:.4f}, "
+            f"Top/Worst {result['top_worst_ratio']:.4f}"
+        )
+        result['figure'] = self.plot_top_vs_bottom_results(
+            result=result,
+            title=title,
+            save_path=save_path,
+            show_plot=show_plot,
+        )
         return result

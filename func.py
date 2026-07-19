@@ -13,6 +13,9 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
+import plotly.graph_objects as go
+from plotly.colors import qualitative
+from plotly.subplots import make_subplots
 
 try:
     from BacktestEngine import PtfBuilder, build_periods_from_breakpoints
@@ -362,7 +365,8 @@ def summarize_component_weights(components):
 
 def run_top_worst_backtest(screen, returns, metric, list_noire_path, bench=DEFAULT_BENCHMARK,
                            percentile=DEFAULT_PERCENTILE, show_plot=True,
-                           save_path=None, metadata=None, period_breakpoints=None):
+                           save_path=None, metadata=None, period_breakpoints=None,
+                           build_figure=True):
     """Exécute un backtest Top/Worst pour une variable déjà disponible dans screen."""
     market_cap_column = 'Benchmark Market Value Millions in EUR '
     if market_cap_column not in screen.columns:
@@ -390,12 +394,25 @@ def run_top_worst_backtest(screen, returns, metric, list_noire_path, bench=DEFAU
         builder.freq_rebal = 1
         builder.fill_method = 'copy'
 
-    comparison = builder_top.backtest_plot_top_vs_bottom(
+    comparison = builder_top.calculate_top_vs_bottom_results(
         builder_bottom=builder_worst,
-        title=f'Factor Analysis: {metric}',
-        save_path=save_path,
-        show_plot=show_plot,
         period_breakpoints=resolved_breakpoints,
+    )
+    print(
+        f"Résultats pour {metric} : "
+        f"score de robustesse {comparison['robust_score']:.4f}, "
+        f"Top/Bench {comparison['top_bench_ratio']:.4f}, "
+        f"Top/Worst {comparison['top_worst_ratio']:.4f}"
+    )
+    should_build_figure = build_figure or show_plot or save_path is not None
+    comparison['figure'] = (
+        builder_top.plot_top_vs_bottom_results(
+            result=comparison,
+            title=f'Analyse factorielle : {metric}',
+            save_path=save_path,
+            show_plot=show_plot,
+        )
+        if should_build_figure else None
     )
     result = {
         'top_builder': builder_top,
@@ -921,6 +938,120 @@ def combine_backtest_performances(results=None, export_dir=None, selections=None
     if return_composition:
         return combined, composition
     return combined
+
+
+def calculate_performance_ratios(performance, benchmark_column='Benchmark'):
+    """Calcule séparément les ratios de chaque courbe par rapport au benchmark."""
+    if not isinstance(performance, pd.DataFrame) or performance.empty:
+        raise ValueError('La table de performances doit être un DataFrame non vide.')
+    if benchmark_column not in performance.columns:
+        raise KeyError(
+            f'Benchmark « {benchmark_column} » absent. '
+            f'Colonnes disponibles : {", ".join(performance.columns)}'
+        )
+    comparison_columns = [
+        column for column in performance.columns if column != benchmark_column
+    ]
+    if not comparison_columns:
+        raise ValueError('Ajoutez au moins une performance à comparer au benchmark.')
+    benchmark = performance[benchmark_column].replace(0, np.nan)
+    ratios = performance[comparison_columns].div(benchmark, axis=0)
+    ratios.index.name = performance.index.name
+    return ratios
+
+
+def plot_performance_comparison(performance, ratios, benchmark_column='Benchmark',
+                                title='Comparaison des performances',
+                                save_path=None, show_plot=True):
+    """Trace en Plotly des performances et ratios déjà calculés."""
+    if benchmark_column not in performance.columns:
+        raise KeyError(f'Benchmark « {benchmark_column} » absent des performances.')
+    missing_ratio_columns = [
+        column for column in ratios.columns if column not in performance.columns
+    ]
+    if missing_ratio_columns:
+        raise KeyError(
+            f'Ratios sans performance correspondante : {missing_ratio_columns}'
+        )
+
+    fig = make_subplots(
+        rows=2,
+        cols=1,
+        shared_xaxes=True,
+        vertical_spacing=0.1,
+        subplot_titles=(
+            'Performance cumulée',
+            f'Ratios par rapport à {benchmark_column}',
+        ),
+    )
+    non_benchmark_columns = [
+        column for column in performance.columns if column != benchmark_column
+    ]
+    color_map = {
+        column: qualitative.Plotly[index % len(qualitative.Plotly)]
+        for index, column in enumerate(non_benchmark_columns)
+    }
+    color_map[benchmark_column] = 'black'
+
+    for column in performance.columns:
+        fig.add_trace(
+            go.Scatter(
+                x=performance.index,
+                y=performance[column],
+                mode='lines',
+                name=column,
+                legendgroup=column,
+                line=dict(
+                    color=color_map[column],
+                    width=3 if column == benchmark_column else 2,
+                ),
+            ),
+            row=1,
+            col=1,
+        )
+
+    for column in ratios.columns:
+        fig.add_trace(
+            go.Scatter(
+                x=ratios.index,
+                y=ratios[column],
+                mode='lines',
+                name=f'{column} / {benchmark_column}',
+                legendgroup=column,
+                line=dict(color=color_map.get(column), width=2),
+            ),
+            row=2,
+            col=1,
+        )
+    fig.add_hline(
+        y=1.0,
+        line_dash='dash',
+        line_color='grey',
+        row=2,
+        col=1,
+    )
+    fig.update_layout(
+        title=title,
+        width=1400,
+        height=800,
+        template='plotly_white',
+        hovermode='x unified',
+        legend=dict(
+            orientation='v',
+            x=1.01,
+            xanchor='left',
+            y=1,
+            yanchor='top',
+        ),
+        margin=dict(r=420, t=100),
+    )
+    if save_path is not None:
+        save_path = Path(save_path)
+        save_path.parent.mkdir(parents=True, exist_ok=True)
+        fig.write_html(save_path)
+    if show_plot:
+        fig.show()
+    return fig
 
 
 def export_backtest_results(results, output_dir, export_name=None, export_png=True,
