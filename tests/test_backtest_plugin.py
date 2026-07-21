@@ -57,6 +57,28 @@ class TestConfigurationSignaux(unittest.TestCase):
         self.assertFalse(component['higher_is_better'])
         self.assertEqual(set(batch), {'screen', 'results'})
 
+    def test_unitaire_sans_dimensions_utilise_uniquement_une_periode(self):
+        screen = _screen_minimal()
+        with patch.object(func, 'run_top_worst_backtest', side_effect=_fake_backtest):
+            batch = func.test_unitary_signals(
+                screen, pd.DataFrame(), ['Revenue 5Y CAGR'], None,
+            )
+
+        self.assertEqual(list(batch['results']), [
+            'Revenue 5Y CAGR | level',
+            'Revenue 5Y CAGR | pct_1',
+            'Revenue 5Y CAGR | diff_1',
+            'Revenue 5Y CAGR | rank_diff_1',
+        ])
+
+    def test_anciens_poids_designent_une_periode(self):
+        options = signal_options(pct=0.3, diff=0.4, rank_diff=0.5)
+
+        self.assertEqual(options['weight_pct_1'], 0.3)
+        self.assertEqual(options['weight_diff_1'], 0.4)
+        self.assertEqual(options['weight_rank_diff_1'], 0.5)
+        self.assertNotIn('weight_pct', options)
+
     def test_composition_exclut_les_variables_absentes(self):
         screen = _screen_minimal()
         config = {
@@ -101,16 +123,53 @@ class TestConfigurationSignaux(unittest.TestCase):
         latest = scored.loc[scored['Date'].eq(dates[-1])].set_index('ISIN')
         composition = func.describe_signal_config(config)
 
-        self.assertLess(latest.loc['A', 'Net Debt to Ebit__rank_diff'], 0)
-        self.assertGreater(latest.loc['C', 'Net Debt to Ebit__rank_diff'], 0)
-        self.assertEqual(latest.loc['D', 'Net Debt to Ebit__rank_diff'], 0)
+        self.assertLess(latest.loc['A', 'Net Debt to Ebit__rank_diff_1'], 0)
+        self.assertGreater(latest.loc['C', 'Net Debt to Ebit__rank_diff_1'], 0)
+        self.assertEqual(latest.loc['D', 'Net Debt to Ebit__rank_diff_1'], 0)
         self.assertLess(latest.loc['A', 'Score_Rank'], latest.loc['C', 'Score_Rank'])
         self.assertTrue(composition[0]['higher_is_better'])
         self.assertFalse(composition[0]['source_higher_is_better'])
         generated = make_signal_config(
             variables=['Net Debt to Ebit'], transformations=('rank_diff',),
         )
-        self.assertEqual(generated['Net Debt to Ebit']['weight_rank_diff'], 1.0)
+        self.assertEqual(generated['Net Debt to Ebit']['weight_rank_diff_1'], 1.0)
+
+    def test_comparaisons_explicitent_trois_six_et_douze_periodes(self):
+        dates = pd.date_range('2023-01-31', periods=13, freq='ME')
+        rows = []
+        for isin, observations in {
+            'A': range(1, 14),
+            'B': range(13, 0, -1),
+        }.items():
+            for date, value in zip(dates, observations):
+                rows.append({
+                    'ISIN': isin,
+                    'Date': date,
+                    ' Benchmark ICB Supersector ': 'Industrials',
+                    'Exchange Country Region': 'Europe',
+                    'Signal': float(value),
+                })
+        screen = pd.DataFrame(rows)
+        config = {
+            'Signal': signal_options(
+                pct_3=1.0, pct_6=1.0, pct_12=1.0,
+                diff_3=1.0, diff_6=1.0, diff_12=1.0,
+                rank_diff_3=1.0, rank_diff_6=1.0, rank_diff_12=1.0,
+            ),
+        }
+
+        scored = func.calculate_composite_score(screen, 'Score_Multi', config)
+        latest = scored.loc[
+            scored['Date'].eq(dates[-1]) & scored['ISIN'].eq('A')
+        ].iloc[0]
+
+        self.assertAlmostEqual(latest['Signal__diff_3'], 3.0)
+        self.assertAlmostEqual(latest['Signal__diff_6'], 6.0)
+        self.assertAlmostEqual(latest['Signal__diff_12'], 12.0)
+        self.assertAlmostEqual(latest['Signal__pct_3'], 13 / 10 - 1)
+        self.assertAlmostEqual(latest['Signal__pct_6'], 13 / 7 - 1)
+        self.assertAlmostEqual(latest['Signal__pct_12'], 13 / 1 - 1)
+        self.assertGreater(latest['Signal__rank_diff_12'], 0)
 
 
 class TestLotsStandardises(unittest.TestCase):

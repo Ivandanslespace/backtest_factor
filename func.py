@@ -17,7 +17,14 @@ import plotly.graph_objects as go
 from plotly.colors import qualitative
 from plotly.subplots import make_subplots
 
-from factor_config import LOWER_IS_BETTER
+from factor_config import (
+    COMPARISON_DIMENSIONS,
+    DEFAULT_SIGNAL_DIMENSIONS,
+    LEGACY_DIMENSION_ALIASES,
+    LOWER_IS_BETTER,
+    SIGNAL_DIMENSIONS,
+    signal_options,
+)
 
 try:
     from BacktestEngine import PtfBuilder, build_periods_from_breakpoints
@@ -54,95 +61,33 @@ RECOMMENDED_PERIOD_BREAKPOINTS = [2020, 2022, 2024]
 
 # Exemple de configuration : un poids strictement positif active la dimension ; zéro la désactive.
 SIGNAL_CONFIG = {
-    'Quality Avg Percentile': {
-        'higher_is_better': True,
-        'weight_level': 1.0, 'weight_pct': 1.0, 'weight_diff': 0.0,
-        'weight_rank_diff': 0.0,
-    },
-    'Revenue 5Y CAGR': {
-        'higher_is_better': True,
-        'weight_level': 1.0, 'weight_pct': 0.0, 'weight_diff': 0.0,
-    },
-    'Sales Growth FY1 CIQ': {
-        'higher_is_better': True,
-        'weight_level': 1.0, 'weight_pct': 0.0, 'weight_diff': 0.0,
-    },
-    'Ebitda 5Y CAGR': {
-        'higher_is_better': True,
-        'weight_level': 1.0, 'weight_pct': 0.0, 'weight_diff': 0.0,
-    },
-    'EBITDA Growth FY1 CIQ': {
-        'higher_is_better': True,
-        'weight_level': 1.0, 'weight_pct': 0.0, 'weight_diff': 0.0,
-    },
-    'Ebit 5Y CAGR': {
-        'higher_is_better': True,
-        'weight_level': 1.0, 'weight_pct': 0.0, 'weight_diff': 0.0,
-    },
-    'EPS Growth FY1 CIQ': {
-        'higher_is_better': True,
-        'weight_level': 1.0, 'weight_pct': 0.0, 'weight_diff': 0.0,
-    },
-    'SP Est 5Y EPS Gr CIQ': {
-        'higher_is_better': True,
-        'weight_level': 1.0, 'weight_pct': 0.0, 'weight_diff': 0.0,
-    },
-    'CFO 5Y CAGR': {
-        'higher_is_better': True,
-        'weight_level': 1.0, 'weight_pct': 0.0, 'weight_diff': 0.0,
-    },
-    'FCF Conversion': {
-        'higher_is_better': True,
-        'weight_level': 1.0, 'weight_pct': 0.0, 'weight_diff': 1.0,
-    },
-    'Gross Profit 5Y CAGR': {
-        'higher_is_better': True,
-        'weight_level': 1.0, 'weight_pct': 0.0, 'weight_diff': 0.0,
-    },
-    'Const Earning 5Y CAGR': {
-        'higher_is_better': True,
-        'weight_level': 0.0, 'weight_pct': 0.0, 'weight_diff': 1.0,
-    },
-    'Gross Margin': {
-        'higher_is_better': True,
-        'weight_level': 1.0, 'weight_pct': 0.0, 'weight_diff': 0.0,
-    },
-    'Ebitda Margin': {
-        'higher_is_better': True,
-        'weight_level': 1.0, 'weight_pct': 0.0, 'weight_diff': 0.0,
-    },
-    'Cont Op Earning Margin': {
-        'higher_is_better': True,
-        'weight_level': 0.0, 'weight_pct': 0.0, 'weight_diff': 1.0,
-    },
-    'R&D Expense CIQ': {
-        'higher_is_better': True,
-        'denominator': 'Sales',
-        'weight_level': 1.0, 'weight_pct': 0.0, 'weight_diff': 0.0,
-    },
-    'Capex CIQ': {
-        'higher_is_better': True,
-        'denominator': 'Sales',
-        'weight_level': 1.0, 'weight_pct': 0.0, 'weight_diff': 0.0,
-    },
-    'Sales FY1': {
-        'higher_is_better': True,
-        'denominator': 'Sales',
-        'weight_level': 1.0, 'weight_pct': 0.0, 'weight_diff': 0.0,
-    },
-    'Net Debt to Ebit': {
-        'higher_is_better': False,
-        'weight_level': 0.0, 'weight_pct': 0.0, 'weight_diff': 1.0,
-    },
-    'Net Debt to Tot Equity': {
-        'higher_is_better': False,
-        'weight_level': 1.0, 'weight_pct': 0.0, 'weight_diff': 1.0,
-    },
-    'Interest expense CIQ': {
-        'higher_is_better': False,
-        'denominator': 'Ebitda',
-        'weight_level': 1.0, 'weight_pct': 0.0, 'weight_diff': 0.0,
-    },
+    'Quality Avg Percentile': signal_options(level=1.0, pct_1=1.0),
+    'Revenue 5Y CAGR': signal_options(level=1.0),
+    'Sales Growth FY1 CIQ': signal_options(level=1.0),
+    'Ebitda 5Y CAGR': signal_options(level=1.0),
+    'EBITDA Growth FY1 CIQ': signal_options(level=1.0),
+    'Ebit 5Y CAGR': signal_options(level=1.0),
+    'EPS Growth FY1 CIQ': signal_options(level=1.0),
+    'SP Est 5Y EPS Gr CIQ': signal_options(level=1.0),
+    'CFO 5Y CAGR': signal_options(level=1.0),
+    'FCF Conversion': signal_options(level=1.0, diff_1=1.0),
+    'Gross Profit 5Y CAGR': signal_options(level=1.0),
+    'Const Earning 5Y CAGR': signal_options(diff_1=1.0),
+    'Gross Margin': signal_options(level=1.0),
+    'Ebitda Margin': signal_options(level=1.0),
+    'Cont Op Earning Margin': signal_options(diff_1=1.0),
+    'R&D Expense CIQ': signal_options(level=1.0, denominator='Sales'),
+    'Capex CIQ': signal_options(level=1.0, denominator='Sales'),
+    'Sales FY1': signal_options(level=1.0, denominator='Sales'),
+    'Net Debt to Ebit': signal_options(
+        higher_is_better=False, diff_1=1.0,
+    ),
+    'Net Debt to Tot Equity': signal_options(
+        higher_is_better=False, level=1.0, diff_1=1.0,
+    ),
+    'Interest expense CIQ': signal_options(
+        higher_is_better=False, level=1.0, denominator='Ebitda',
+    ),
 }
 
 
@@ -307,18 +252,41 @@ def neutralize_score(df, score_col, higher_is_better, group_cols=None):
     return df
 
 
+def _canonical_dimension(dimension):
+    """Convertit les anciens noms sans horizon vers la comparaison à une période."""
+    return LEGACY_DIMENSION_ALIASES.get(dimension, dimension)
+
+
+def _derived_dimension(variable):
+    """Identifie la dimension dérivée présente à la fin d'un nom de colonne."""
+    dimensions = tuple(COMPARISON_DIMENSIONS) + tuple(LEGACY_DIMENSION_ALIASES)
+    for dimension in sorted(dimensions, key=len, reverse=True):
+        if str(variable).endswith(f'__{dimension}'):
+            return _canonical_dimension(dimension)
+    return None
+
+
 def _raw_variable_name(variable):
     """Retrouve la variable brute derrière une colonne dérivée connue."""
     raw_variable = str(variable)
-    for suffix in ('__pct', '__diff', '__rank_diff'):
-        if raw_variable.endswith(suffix):
-            raw_variable = raw_variable[:-len(suffix)]
+    dimension = _derived_dimension(raw_variable)
+    if dimension:
+        suffixes = (f'__{dimension}',) + tuple(
+            f'__{legacy}'
+            for legacy, canonical in LEGACY_DIMENSION_ALIASES.items()
+            if canonical == dimension
+        )
+        for suffix in suffixes:
+            if raw_variable.endswith(suffix):
+                raw_variable = raw_variable[:-len(suffix)]
+                break
     return raw_variable.split('__over__', 1)[0]
 
 
 def _default_higher_is_better(variable):
     """Déduit la direction d'une variable à partir du catalogue central."""
-    if str(variable).endswith('__rank_diff'):
+    dimension = _derived_dimension(variable)
+    if dimension and dimension.startswith('rank_diff_'):
         return True
     return _raw_variable_name(variable) not in LOWER_IS_BETTER
 
@@ -375,7 +343,17 @@ def prepare_signals(screen, signal_config, group_cols=None, copy_data=False):
 
 def _component_weight(options, dimension):
     """Retourne un poids positif ; zéro, une valeur absente ou négative désactive la dimension."""
-    weight = options.get(f'weight_{dimension}', 0.0)
+    dimension = _canonical_dimension(dimension)
+    weight_key = f'weight_{dimension}'
+    if weight_key in options:
+        weight = options[weight_key]
+    else:
+        base_dimension, period = (
+            dimension.rsplit('_', 1)
+            if dimension != 'level' else (None, None)
+        )
+        legacy_key = f'weight_{base_dimension}' if period == '1' else None
+        weight = options.get(legacy_key, 0.0) if legacy_key else 0.0
     try:
         weight = float(weight)
     except (TypeError, ValueError) as error:
@@ -386,28 +364,28 @@ def _component_weight(options, dimension):
 
 
 def build_signal_component(screen, variable, options, group_cols=None, keep_derived_columns=True):
-    """Construit le niveau, les variations de valeur et la variation de rang."""
+    """Construit le niveau et les variations explicites à 1, 3, 6 ou 12 périodes."""
     group_cols = GROUP_COLS if group_cols is None else group_cols
     contribution = pd.Series(0.0, index=screen.index)
 
-    components = (
-        ('level', variable),
-        ('pct', f'{variable}__pct'),
-        ('diff', f'{variable}__diff'),
-        ('rank_diff', f'{variable}__rank_diff'),
-    )
+    components = [('level', variable)] + [
+        (dimension, f'{variable}__{dimension}')
+        for dimension in COMPARISON_DIMENSIONS
+    ]
 
     for component, column in components:
         weight = _component_weight(options, component)
         if weight == 0:
             continue
-        if component in ('pct', 'diff', 'rank_diff'):
+        if component != 'level':
+            base_dimension, period_text = component.rsplit('_', 1)
+            period = int(period_text)
             isin_values = (
                 screen['ISIN'].to_numpy()
                 if 'ISIN' in screen.columns else screen.index.to_numpy()
             )
             source_values = screen[variable]
-            if component == 'rank_diff':
+            if base_dimension == 'rank_diff':
                 source_values = (
                     screen.groupby(group_cols)[variable]
                     .rank(pct=True, ascending=options['higher_is_better']) * 10
@@ -418,13 +396,13 @@ def build_signal_component(screen, variable, options, group_cols=None, keep_deri
                 '_date': pd.to_datetime(screen['Date']).to_numpy(),
                 '_value': source_values.to_numpy(),
             }).sort_values(['_isin', '_date'])
-            if component == 'pct':
+            if base_dimension == 'pct':
                 filled_values = ordered.groupby('_isin')['_value'].ffill()
                 derived = filled_values.groupby(ordered['_isin']).pct_change(
-                    fill_method=None
+                    periods=period, fill_method=None,
                 )
             else:
-                derived = ordered.groupby('_isin')['_value'].diff()
+                derived = ordered.groupby('_isin')['_value'].diff(periods=period)
             screen[column] = pd.Series(
                 derived.to_numpy(), index=ordered['_position']
             ).sort_index().to_numpy()
@@ -434,7 +412,8 @@ def build_signal_component(screen, variable, options, group_cols=None, keep_deri
         score_col = f'{column}__score'
         screen[score_col] = screen[column]
         component_direction = (
-            True if component == 'rank_diff' else options['higher_is_better']
+            True if component.startswith('rank_diff_')
+            else options['higher_is_better']
         )
         screen = neutralize_score(screen, score_col, component_direction, group_cols)
         contribution = contribution.add(screen[score_col] * weight, fill_value=0.0)
@@ -460,7 +439,7 @@ def calculate_composite_score(screen, score_col, signal_config, group_cols=None,
     for variable, options in resolved_config.items():
         if not any(
             _component_weight(options, component) > 0
-            for component in ('level', 'pct', 'diff', 'rank_diff')
+            for component in SIGNAL_DIMENSIONS
         ):
             continue
         prepared, contribution = build_signal_component(
@@ -485,7 +464,7 @@ def describe_signal_config(signal_config, role='signal'):
         prepared_variable = (
             f'{raw_variable}__over__{denominator}' if denominator else raw_variable
         )
-        for dimension in ('level', 'pct', 'diff', 'rank_diff'):
+        for dimension in SIGNAL_DIMENSIONS:
             weight = _component_weight(options, dimension)
             if weight == 0:
                 continue
@@ -501,7 +480,7 @@ def describe_signal_config(signal_config, role='signal'):
                 'denominator': denominator,
                 'dimension': dimension,
                 'higher_is_better': (
-                    True if dimension == 'rank_diff'
+                    True if dimension.startswith('rank_diff_')
                     else options.get('higher_is_better')
                 ),
                 'source_higher_is_better': options.get('higher_is_better'),
@@ -518,10 +497,7 @@ def summarize_component_weights(components):
         raw_variable = component.get('raw_variable')
         weight = float(component.get('weight', 0.0))
         variable = summary.setdefault(raw_variable, {
-            'weight_level': 0.0,
-            'weight_pct': 0.0,
-            'weight_diff': 0.0,
-            'weight_rank_diff': 0.0,
+            **{f'weight_{dimension}': 0.0 for dimension in SIGNAL_DIMENSIONS},
             'total_weight': 0.0,
             'absolute_weight': 0.0,
             'absolute_weight_share': 0.0,
@@ -618,7 +594,7 @@ def run_top_worst_backtest(screen, returns, metric, list_noire_path, bench=DEFAU
 
 
 def test_unitary_signals(screen, returns, signal_config, list_noire_path,
-                         dimensions=('level', 'pct', 'diff', 'rank_diff'),
+                         dimensions=DEFAULT_SIGNAL_DIMENSIONS,
                          **backtest_options):
     """Teste séparément les dimensions et retourne un lot standardisé."""
     if not isinstance(signal_config, dict):
@@ -629,23 +605,24 @@ def test_unitary_signals(screen, returns, signal_config, list_noire_path,
     signal_config = _resolve_signal_config(screen, signal_config)
     results = {}
     working_screen = screen
+    requested_dimensions = tuple(dict.fromkeys(
+        _canonical_dimension(dimension) for dimension in dimensions
+    ))
+    unknown_dimensions = set(requested_dimensions) - set(SIGNAL_DIMENSIONS)
+    if unknown_dimensions:
+        raise ValueError(f'Dimensions inconnues : {sorted(unknown_dimensions)}')
     dimension_options = {
-        'level': 'weight_level',
-        'pct': 'weight_pct',
-        'diff': 'weight_diff',
-        'rank_diff': 'weight_rank_diff',
+        dimension: f'weight_{dimension}' for dimension in SIGNAL_DIMENSIONS
     }
 
     for variable, options in signal_config.items():
         for label, weight_key in dimension_options.items():
-            if label not in dimensions:
+            if label not in requested_dimensions:
                 continue
 
             unitary_options = copy.deepcopy(options)
-            for key in (
-                'weight_level', 'weight_pct', 'weight_diff', 'weight_rank_diff',
-            ):
-                unitary_options[key] = 0.0
+            for dimension in SIGNAL_DIMENSIONS:
+                unitary_options[f'weight_{dimension}'] = 0.0
             unitary_options[weight_key] = 1.0
 
             metric = f'Unitary_{label}_{variable}'

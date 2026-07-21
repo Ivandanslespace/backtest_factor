@@ -306,6 +306,21 @@ LOWER_IS_BETTER = {
 }
 
 
+# Les horizons comptent les observations successives de chaque société.
+COMPARISON_PERIODS = (1, 3, 6, 12)
+COMPARISON_BASE_DIMENSIONS = ('pct', 'diff', 'rank_diff')
+COMPARISON_DIMENSIONS = tuple(
+    f'{dimension}_{period}'
+    for dimension in COMPARISON_BASE_DIMENSIONS
+    for period in COMPARISON_PERIODS
+)
+SIGNAL_DIMENSIONS = ('level',) + COMPARISON_DIMENSIONS
+DEFAULT_SIGNAL_DIMENSIONS = ('level', 'pct_1', 'diff_1', 'rank_diff_1')
+LEGACY_DIMENSION_ALIASES = {
+    dimension: f'{dimension}_1' for dimension in COMPARISON_BASE_DIMENSIONS
+}
+
+
 def factor_columns(*families):
     """Retourne les colonnes uniques des familles demandées."""
     selected_families = families or tuple(FACTOR_FAMILIES)
@@ -320,14 +335,33 @@ def factor_columns(*families):
 
 
 def signal_options(higher_is_better=True, level=0.0, pct=0.0, diff=0.0,
-                   denominator=None, rank_diff=0.0):
-    """Décrit un signal compact avec uniquement sa direction et ses poids actifs."""
+                   denominator=None, rank_diff=0.0,
+                   pct_1=None, pct_3=0.0, pct_6=0.0, pct_12=0.0,
+                   diff_1=None, diff_3=0.0, diff_6=0.0, diff_12=0.0,
+                   rank_diff_1=None, rank_diff_3=0.0,
+                   rank_diff_6=0.0, rank_diff_12=0.0):
+    """Décrit les poids par horizon ; les anciens noms désignent une période."""
+    comparison_weights = {
+        'pct_1': pct if pct_1 is None else pct_1,
+        'pct_3': pct_3,
+        'pct_6': pct_6,
+        'pct_12': pct_12,
+        'diff_1': diff if diff_1 is None else diff_1,
+        'diff_3': diff_3,
+        'diff_6': diff_6,
+        'diff_12': diff_12,
+        'rank_diff_1': rank_diff if rank_diff_1 is None else rank_diff_1,
+        'rank_diff_3': rank_diff_3,
+        'rank_diff_6': rank_diff_6,
+        'rank_diff_12': rank_diff_12,
+    }
     options = {
         'higher_is_better': higher_is_better,
         'weight_level': level,
-        'weight_pct': pct,
-        'weight_diff': diff,
-        'weight_rank_diff': rank_diff,
+        **{
+            f'weight_{dimension}': comparison_weights[dimension]
+            for dimension in COMPARISON_DIMENSIONS
+        },
     }
     if denominator is not None:
         options['denominator'] = denominator
@@ -341,18 +375,20 @@ def make_signal_config(*families, variables=None, transformations=('level',)):
     selected_variables = (
         list(variables) if variables is not None else factor_columns(*families)
     )
-    unknown_transformations = set(transformations) - {
-        'level', 'pct', 'diff', 'rank_diff',
+    canonical_transformations = {
+        LEGACY_DIMENSION_ALIASES.get(transformation, transformation)
+        for transformation in transformations
     }
+    unknown_transformations = canonical_transformations - set(SIGNAL_DIMENSIONS)
     if unknown_transformations:
         raise ValueError(f'Transformations inconnues : {sorted(unknown_transformations)}')
 
     config = {}
     for variable in selected_variables:
         options = {'higher_is_better': variable not in LOWER_IS_BETTER}
-        for transformation in ('level', 'pct', 'diff', 'rank_diff'):
+        for transformation in SIGNAL_DIMENSIONS:
             options[f'weight_{transformation}'] = (
-                1.0 if transformation in transformations else 0.0
+                1.0 if transformation in canonical_transformations else 0.0
             )
         config[variable] = options
     return config
