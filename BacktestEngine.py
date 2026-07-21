@@ -206,7 +206,8 @@ class PtfBuilder:
                 output_dir=None,
                 cap_weight_threshold=None,
                 score_pivot_esg=None,    # score_pivot_esg = "INDEX MSCI WORLD_vs_1330696"
-                score_pivot_esg_path=r"\\groupe-ufg.com\commun\Public\DIRR\Data\riskindics\notes pivots"):
+                score_pivot_esg_path=r"\\groupe-ufg.com\commun\Public\DIRR\Data\riskindics\notes pivots",
+                bench_perf=None):
         """
         initialisation des paramètres de la classe 
 
@@ -258,7 +259,7 @@ class PtfBuilder:
         self.sec_list_monthly=None
         self.sec_list_historical=None
         self.perf_ptf=None
-        self.perf_bench=None
+        self.perf_bench = copy.deepcopy(bench_perf) if bench_perf is not None else None
         self.buy_list=None
         self.Top = Top
         self.mode_monthly_prod = mode_monthly_prod

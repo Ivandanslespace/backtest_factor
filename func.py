@@ -10,13 +10,14 @@ import json
 import re
 from datetime import datetime
 from pathlib import Path
-from uuid import uuid4
 
 import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 from plotly.colors import qualitative
 from plotly.subplots import make_subplots
+
+from factor_config import LOWER_IS_BETTER
 
 try:
     from BacktestEngine import PtfBuilder, build_periods_from_breakpoints
@@ -49,10 +50,6 @@ PERIOD_SUMMARY_METRICS = (
 # 2020 pour la pandémie, 2022 pour le régime inflationniste et 2024 pour la normalisation.
 # Ajoutez 2009 si les données couvrent aussi la période précédant la crise financière.
 RECOMMENDED_PERIOD_BREAKPOINTS = [2020, 2022, 2024]
-
-
-_BENCHMARK_PERFORMANCE_CACHE = {}
-_DATA_SOURCE_TOKEN = '_backtest_source_token'
 
 
 # Exemple de configuration : un poids strictement positif active la dimension ; zéro la désactive.
@@ -189,12 +186,6 @@ def _parquet_columns(path):
     return parquet.ParquetFile(path).schema_arrow.names
 
 
-def _set_source_token(data, token):
-    """Attache une identité de source conservée par les copies pandas."""
-    data.attrs[_DATA_SOURCE_TOKEN] = str(token)
-    return data
-
-
 def load_backtest_data(screen_path, returns_path, variables=None, signal_config=None,
                        bench=DEFAULT_BENCHMARK):
     """Charge les colonnes utiles du screen et les rendements des membres du benchmark."""
@@ -231,35 +222,11 @@ def load_backtest_data(screen_path, returns_path, variables=None, signal_config=
         raise ValueError('Aucun SEDOL du benchmark n’est disponible dans les rendements.')
     returns = pd.read_parquet(returns_path, columns=return_columns)
 
-    screen_stat = screen_path.stat()
-    returns_stat = returns_path.stat()
-    _set_source_token(
-        screen,
-        f'{screen_path.resolve()}:{screen_stat.st_size}:{screen_stat.st_mtime_ns}',
-    )
-    _set_source_token(
-        returns,
-        f'{returns_path.resolve()}:{returns_stat.st_size}:{returns_stat.st_mtime_ns}',
-    )
     print(
         f'Données chargées : {len(screen.columns)} colonnes screen et '
         f'{len(returns.columns)} colonnes de rendements du benchmark.'
     )
     return screen, returns
-
-
-def clear_benchmark_performance_cache():
-    """Vide le cache après toute modification des données du benchmark."""
-    _BENCHMARK_PERFORMANCE_CACHE.clear()
-
-
-def _data_source_token(data):
-    """Identifie une source en mémoire tout en gardant le jeton de ses copies."""
-    token = data.attrs.get(_DATA_SOURCE_TOKEN)
-    if token is None:
-        token = f'memory:{uuid4().hex}'
-        data.attrs[_DATA_SOURCE_TOKEN] = token
-    return token
 
 
 def _backtest_inputs(screen, returns, metric, bench):
@@ -276,8 +243,10 @@ def _backtest_inputs(screen, returns, metric, bench):
     weight_column = f'Weight in {bench}'
     screen_columns = [
         'Date', 'Company SEDOL', ' Benchmark ICB Supersector ',
-        weight_column, market_cap_column, metric,
+        weight_column, market_cap_column,
     ]
+    if metric is not None:
+        screen_columns.append(metric)
     if 'ISIN' in screen.columns:
         screen_columns.insert(1, 'ISIN')
     elif screen.index.name != 'ISIN':
@@ -298,17 +267,24 @@ def _backtest_inputs(screen, returns, metric, bench):
 
     slim_screen = screen.loc[:, screen_columns].copy()
     slim_returns = returns.loc[:, return_columns].copy()
-    _set_source_token(slim_screen, _data_source_token(screen))
-    _set_source_token(slim_returns, _data_source_token(returns))
     return slim_screen, slim_returns
 
 
-def _benchmark_cache_key(screen, returns, bench, start_date):
-    """Construit la clé des seules entrées capables de modifier le benchmark."""
-    return (
-        _data_source_token(screen), _data_source_token(returns),
-        str(bench), str(pd.Timestamp(start_date).date()),
+def calculate_benchmark_performance(screen, returns, bench=DEFAULT_BENCHMARK,
+                                    start_date=DEFAULT_START_DATE):
+    """Calcule une fois la performance du benchmark destinée aux autres tests."""
+    benchmark_screen, benchmark_returns = _backtest_inputs(
+        screen, returns, metric=None, bench=bench,
     )
+    builder = PtfBuilder(
+        benchmark_screen, benchmark_returns,
+        ptf_name=f'{bench}_benchmark', bench=bench,
+        percentile=DEFAULT_PERCENTILE, esg_exclusion=0,
+        liste_noire=None, metrics=None, Top=True,
+    )
+    builder.start_date = pd.Timestamp(start_date)
+    builder.backtest_get_bench_perf(builder.screen, builder.start_date, bench)
+    return builder.perf_bench.copy()
 
 
 def handle_missing_values(df, columns, group_cols=None):
@@ -328,6 +304,42 @@ def neutralize_score(df, score_col, higher_is_better, group_cols=None):
         .rank(pct=True, ascending=higher_is_better) * 10
     )
     return df
+
+
+def _raw_variable_name(variable):
+    """Retrouve la variable brute derrière une colonne dérivée connue."""
+    raw_variable = str(variable)
+    for suffix in ('__pct', '__diff'):
+        if raw_variable.endswith(suffix):
+            raw_variable = raw_variable[:-len(suffix)]
+    return raw_variable.split('__over__', 1)[0]
+
+
+def _default_higher_is_better(variable):
+    """Déduit la direction d'une variable à partir du catalogue central."""
+    return _raw_variable_name(variable) not in LOWER_IS_BETTER
+
+
+def _resolve_signal_config(screen, signal_config):
+    """Conserve les signaux disponibles et complète leur direction par défaut."""
+    resolved = {}
+    for variable, source_options in signal_config.items():
+        if not isinstance(source_options, dict):
+            raise TypeError(f'Les options de {variable} doivent former un dictionnaire.')
+        options = copy.deepcopy(source_options)
+        options.setdefault('higher_is_better', _default_higher_is_better(variable))
+        denominator = options.get('denominator')
+        if variable not in screen.columns:
+            print(f'Avertissement : colonne absente {variable}. Signal ignoré.')
+            continue
+        if denominator and denominator not in screen.columns:
+            print(
+                f'Avertissement : dénominateur {denominator} absent pour '
+                f'{variable}. Signal ignoré.'
+            )
+            continue
+        resolved[variable] = options
+    return resolved
 
 
 def prepare_signals(screen, signal_config, group_cols=None, copy_data=False):
@@ -425,6 +437,7 @@ def calculate_composite_score(screen, score_col, signal_config, group_cols=None,
                               copy_data=False, keep_derived_columns=True):
     """Agrège les signaux et conserve par défaut les variables dérivées dans screen."""
     group_cols = GROUP_COLS if group_cols is None else group_cols
+    signal_config = _resolve_signal_config(screen, signal_config)
     prepared, resolved_config = prepare_signals(
         screen, signal_config, group_cols, copy_data=copy_data,
     )
@@ -509,17 +522,12 @@ def summarize_component_weights(components):
 def run_top_worst_backtest(screen, returns, metric, list_noire_path, bench=DEFAULT_BENCHMARK,
                            percentile=DEFAULT_PERCENTILE, show_plot=True,
                            save_path=None, metadata=None, period_breakpoints=None,
-                           build_figure=True, use_benchmark_cache=True):
-    """Exécute un backtest Top/Worst pour une variable déjà disponible dans screen."""
+                           build_figure=True, bench_perf=None,
+                           start_date=DEFAULT_START_DATE, freq_rebal=1,
+                           fill_method='copy'):
+    """Exécute Top/Worst et réutilise la performance de benchmark fournie."""
     backtest_screen, backtest_returns = _backtest_inputs(
         screen, returns, metric=metric, bench=bench,
-    )
-    cache_key = _benchmark_cache_key(
-        backtest_screen, backtest_returns, bench, DEFAULT_START_DATE,
-    )
-    cached_benchmark = (
-        _BENCHMARK_PERFORMANCE_CACHE.get(cache_key)
-        if use_benchmark_cache else None
     )
     resolved_breakpoints = list(
         RECOMMENDED_PERIOD_BREAKPOINTS
@@ -528,31 +536,23 @@ def run_top_worst_backtest(screen, returns, metric, list_noire_path, bench=DEFAU
     builder_top = PtfBuilder(
         backtest_screen, backtest_returns, ptf_name=f'{metric}_top', bench=bench,
         percentile=percentile, esg_exclusion=0, liste_noire=list_noire_path,
-        metrics=metric, Top=True,
+        metrics=metric, Top=True, bench_perf=bench_perf,
     )
     builder_worst = PtfBuilder(
         backtest_screen, backtest_returns, ptf_name=f'{metric}_worst', bench=bench,
         percentile=percentile, esg_exclusion=0, liste_noire=list_noire_path,
-        metrics=metric, Top=False,
+        metrics=metric, Top=False, bench_perf=bench_perf,
     )
 
-    if cached_benchmark is not None:
-        builder_top.perf_bench = cached_benchmark.copy()
-        builder_worst.perf_bench = cached_benchmark.copy()
-        print('Performance du benchmark réutilisée depuis le cache.')
-
     for builder in (builder_top, builder_worst):
-        builder.start_date = pd.Timestamp(DEFAULT_START_DATE)
-        builder.freq_rebal = 1
-        builder.fill_method = 'copy'
+        builder.start_date = pd.Timestamp(start_date)
+        builder.freq_rebal = freq_rebal
+        builder.fill_method = fill_method
 
     comparison = builder_top.calculate_top_vs_bottom_results(
         builder_bottom=builder_worst,
         period_breakpoints=resolved_breakpoints,
     )
-    if use_benchmark_cache and cached_benchmark is None:
-        _BENCHMARK_PERFORMANCE_CACHE[cache_key] = builder_top.perf_bench.copy()
-        print('Performance du benchmark calculée puis mise en cache.')
     print(
         f"Résultats pour {metric} : "
         f"score de robustesse {comparison['robust_score']:.4f}, "
@@ -578,11 +578,11 @@ def run_top_worst_backtest(screen, returns, metric, list_noire_path, bench=DEFAU
             'metric': metric,
             'benchmark': bench,
             'percentile': percentile,
-            'start_date': DEFAULT_START_DATE,
-            'frequency_rebalancing': 1,
-            'fill_method': 'copy',
+            'start_date': str(pd.Timestamp(start_date).date()),
+            'frequency_rebalancing': freq_rebal,
+            'fill_method': fill_method,
             'period_breakpoints': resolved_breakpoints,
-            'benchmark_cache_hit': cached_benchmark is not None,
+            'benchmark_performance_provided': bench_perf is not None,
             'components': [],
         },
     }
@@ -601,13 +601,15 @@ def run_top_worst_backtest(screen, returns, metric, list_noire_path, bench=DEFAU
 
 def test_unitary_signals(screen, returns, signal_config, list_noire_path,
                          dimensions=('level', 'pct', 'diff'), **backtest_options):
-    """Teste séparément les dimensions demandées et accepte aussi une simple liste."""
-    results = {}
+    """Teste séparément les dimensions et retourne un lot standardisé."""
     if not isinstance(signal_config, dict):
         signal_config = {
-            variable: {'higher_is_better': True}
+            variable: {'higher_is_better': _default_higher_is_better(variable)}
             for variable in _config_variables(signal_config)
         }
+    signal_config = _resolve_signal_config(screen, signal_config)
+    results = {}
+    working_screen = screen
     dimension_options = {
         'level': 'weight_level',
         'pct': 'weight_pct',
@@ -615,10 +617,6 @@ def test_unitary_signals(screen, returns, signal_config, list_noire_path,
     }
 
     for variable, options in signal_config.items():
-        denominator = options.get('denominator')
-        if variable not in screen.columns or (denominator and denominator not in screen.columns):
-            print(f'Avertissement : données insuffisantes pour {variable}. Signal ignoré.')
-            continue
         for label, weight_key in dimension_options.items():
             if label not in dimensions:
                 continue
@@ -630,9 +628,11 @@ def test_unitary_signals(screen, returns, signal_config, list_noire_path,
 
             metric = f'Unitary_{label}_{variable}'
             print(f'Test de signal unitaire : {variable} | {label}')
-            scored = calculate_composite_score(screen, metric, {variable: unitary_options})
+            working_screen = calculate_composite_score(
+                working_screen, metric, {variable: unitary_options},
+            )
             results[f'{variable} | {label}'] = run_top_worst_backtest(
-                scored, returns, metric, list_noire_path,
+                working_screen, returns, metric, list_noire_path,
                 metadata={
                     'test_type': 'unitary',
                     'test_name': f'{variable} | {label}',
@@ -642,77 +642,74 @@ def test_unitary_signals(screen, returns, signal_config, list_noire_path,
                 },
                 **backtest_options,
             )
-    return results
+    return {'screen': working_screen, 'results': results}
 
 
 def test_incremental_signals(screen, returns, baseline_config, candidate_config,
                              list_noire_path, **backtest_options):
-    """Compare un score de base avec ce score enrichi d'un signal candidat."""
+    """Compare une base et ses candidats dans un lot standardisé."""
+    baseline_config = _resolve_signal_config(screen, baseline_config)
     results = {}
     baseline_metric = 'Score_Baseline'
-    baseline_screen = calculate_composite_score(screen, baseline_metric, baseline_config)
-    results['Baseline'] = {
-        'screen': baseline_screen.copy(),
-        'backtest': run_top_worst_backtest(
-            baseline_screen, returns, baseline_metric, list_noire_path,
-            metadata={
-                'test_type': 'incremental_baseline',
-                'test_name': 'Baseline',
-                'components': describe_signal_config(baseline_config, role='baseline'),
-            },
-            **backtest_options,
-        ),
-    }
+    working_screen = calculate_composite_score(
+        screen, baseline_metric, baseline_config,
+    )
+    results['Baseline'] = run_top_worst_backtest(
+        working_screen, returns, baseline_metric, list_noire_path,
+        metadata={
+            'test_type': 'incremental_baseline',
+            'test_name': 'Baseline',
+            'components': describe_signal_config(baseline_config, role='baseline'),
+        },
+        **backtest_options,
+    )
 
     for variable, options in candidate_config.items():
         if variable in baseline_config:
             print(f'Avertissement : {variable} appartient déjà à la base. Signal ignoré.')
             continue
 
+        resolved_candidate = _resolve_signal_config(screen, {variable: options})
+        if not resolved_candidate:
+            continue
         incremental_config = copy.deepcopy(baseline_config)
-        incremental_config[variable] = copy.deepcopy(options)
+        incremental_config.update(resolved_candidate)
         metric = f'Score_Incremental_{variable}'
         print(f'Test incrémental : {variable}')
-        incremental_screen = calculate_composite_score(screen, metric, incremental_config)
-        results[variable] = {
-            'screen': incremental_screen.copy(),
-            'backtest': run_top_worst_backtest(
-                incremental_screen, returns, metric, list_noire_path,
-                metadata={
-                    'test_type': 'incremental_candidate',
-                    'test_name': variable,
-                    'components': (
-                        describe_signal_config(baseline_config, role='baseline')
-                        + describe_signal_config({variable: options}, role='candidate')
-                    ),
-                },
-                **backtest_options,
-            ),
-        }
-    return results
+        working_screen = calculate_composite_score(
+            working_screen, metric, incremental_config,
+        )
+        results[variable] = run_top_worst_backtest(
+            working_screen, returns, metric, list_noire_path,
+            metadata={
+                'test_type': 'incremental_candidate',
+                'test_name': variable,
+                'components': (
+                    describe_signal_config(baseline_config, role='baseline')
+                    + describe_signal_config(resolved_candidate, role='candidate')
+                ),
+            },
+            **backtest_options,
+        )
+    return {'screen': working_screen, 'results': results}
 
 
 def test_composite_signal(screen, returns, score_col, signal_config,
-                          list_noire_path, test_name=None,
-                          copy_screen_result=True, **backtest_options):
-    """Construit puis teste un score composite tout en enregistrant sa composition."""
+                          list_noire_path, test_name=None, **backtest_options):
+    """Construit un seul composite et retourne un lot standardisé."""
+    signal_config = _resolve_signal_config(screen, signal_config)
     scored_screen = calculate_composite_score(screen, score_col, signal_config)
+    result_name = test_name or score_col
     backtest_result = run_top_worst_backtest(
         scored_screen, returns, score_col, list_noire_path,
         metadata={
             'test_type': 'composite',
-            'test_name': test_name or score_col,
+            'test_name': result_name,
             'components': describe_signal_config(signal_config, role='composite'),
         },
         **backtest_options,
     )
-    return {
-        'screen': scored_screen.copy() if copy_screen_result else scored_screen,
-        'composition': backtest_result['composition'].copy(),
-        'raw_variables': copy.deepcopy(backtest_result['raw_variables']),
-        'raw_variable_weights': copy.deepcopy(backtest_result['raw_variable_weights']),
-        'backtest': backtest_result,
-    }
+    return {'screen': scored_screen, 'results': {result_name: backtest_result}}
 
 
 def test_composite_signals(screen, returns, composite_configs, list_noire_path,
@@ -730,18 +727,17 @@ def test_composite_signals(screen, returns, composite_configs, list_noire_path,
             )
         score_col = f'{score_prefix}_{index}_{_safe_filename(composite_name)}'
         print(f'Test de score composite : {composite_name}')
-        result = test_composite_signal(
+        batch = test_composite_signal(
             screen=working_screen,
             returns=returns,
             score_col=score_col,
             signal_config=signal_config,
             list_noire_path=list_noire_path,
             test_name=str(composite_name),
-            copy_screen_result=False,
             **backtest_options,
         )
-        working_screen = result.pop('screen')
-        results[composite_name] = result
+        working_screen = batch['screen']
+        results[composite_name] = batch['results'][str(composite_name)]
 
     return {'screen': working_screen, 'results': results}
 
@@ -749,6 +745,9 @@ def test_composite_signals(screen, returns, composite_configs, list_noire_path,
 def _iter_backtest_results(results, path=()):
     """Parcourt récursivement les différentes structures de résultats du module."""
     if not isinstance(results, dict):
+        return
+    if 'screen' in results and isinstance(results.get('results'), dict):
+        yield from _iter_backtest_results(results['results'], path)
         return
     if 'backtest' in results and isinstance(results['backtest'], dict):
         yield ' / '.join(path), results['backtest']
