@@ -257,8 +257,6 @@ class PtfBuilder:
         self.multiprocessing=multiprocessing
         self.sec_list_monthly=None
         self.sec_list_historical=None
-        self.list_exclusion_monthly =None
-        self.list_exclusion_histo=None
         self.perf_ptf=None
         self.perf_bench=None
         self.buy_list=None
@@ -313,22 +311,17 @@ class PtfBuilder:
     def filtrage_esg_liste_noire(self, df, date):
         """
         Filtrage en fonction des performances ESG et de la liste noire.
-        Retourne le DataFrame filtré, la liste des exclusions ESG, et la liste noire.
+        Retourne uniquement le DataFrame filtré.
         """
         import copy
         df_esg = copy.deepcopy(df)
-        Worst_ESG = []
-        Blacklisted = []
-
         # ESG filtering
         if date.year >= 2014 and isinstance(self.score_pivot_esg, float):
             df_esg = df[df['ESG_ANALYST_SCORE'] > self.score_pivot_esg]
-            Worst_ESG = df.loc[~df.index.isin(df_esg.index)].index.tolist() # Toutes les lignes exclues (non dans df_esg) sont les "Worst ESG"
 
         elif date.year >= 2014 and self.esg_exclusion > 0:  # this will entrer only when if date.year >= 2014 and isinstance(self.score_pivot_esg, float) is FALSE
             esg_pct = df['ESG_ANALYST_SCORE'].rank(pct=True)
             df_esg = df.loc[esg_pct >= self.esg_exclusion]
-            Worst_ESG = df.loc[~df.index.isin(df_esg.index)].index.tolist()
 
 
         # Blacklist filtering
@@ -337,16 +330,11 @@ class PtfBuilder:
                 self._liste_noire = read_liste_noire(self._liste_noire, [], [])
 
             if 'ISIN' in df_esg.columns:
-                Blacklisted = df_esg[df_esg['ISIN'].isin(self._liste_noire)].index.tolist()
                 df_esg = df_esg[~df_esg['ISIN'].isin(self._liste_noire)]
             elif df_esg.index.name == 'ISIN':
-                Blacklisted = df_esg[df_esg.index.isin(self._liste_noire)].index.tolist()
                 df_esg = df_esg[~df_esg.index.isin(self._liste_noire)]
 
-        # Save companies excluded beaucause of ESG reason 
-        titles_excluded = self.save_esg_blacklist(df, Worst_ESG, Blacklisted)
-
-        return df_esg, titles_excluded
+        return df_esg
 
 
     def find_esg_pivot_file_path(self):
@@ -725,45 +713,6 @@ class PtfBuilder:
         
         return result
 
-    def save_esg_blacklist(self, screen: pd.DataFrame, Worst_ESG: list, Blacklisted: list) -> pd.DataFrame:
-        """
-        Filters the screen DataFrame to include only ISINs present in Worst_ESG or Blacklisted.
-        Adds a 'Raison Exclusion' column indicating the reason(s) for exclusion.
-        Keeps only rows where at least one of these flags is True.
-
-        Parameters:
-        - screen: pd.DataFrame with ISINs as index and a 'Date' column.
-        - Worst_ESG: list of ISINs flagged for worst ESG.
-        - Blacklisted: list of ISINs that are blacklisted.
-
-        Returns:
-        - pd.DataFrame with 'Date' and 'Raison Exclusion' columns.
-        """
-        # Combine ISINs from both lists
-        filtered_isins = set(Worst_ESG).union(set(Blacklisted))
-
-        # Filter the screen DataFrame to include only relevant ISINs
-        filtered_df = screen.loc[screen.index.intersection(filtered_isins)].copy()
-
-        # Determine reasons for exclusion
-        reasons = []
-        for isin in filtered_df.index:
-            reason = []
-            if isin in Worst_ESG:
-                reason.append("ESG Reason")
-            if isin in Blacklisted:
-                reason.append("Blacklisted")
-            reasons.append(", ".join(reason))
-
-        # Assign the reasons to a new column
-        filtered_df["Raison Exclusion"] = reasons
-
-        # Keep only the required columns
-        final_df = filtered_df[["Date", "Raison Exclusion"]]
-
-        return final_df
-
-
     def select_titles(self, group, max_weight_threshold, column):
         """
             Sélectionne un nombre minimum de titres dans un secteur afin de respecter
@@ -840,7 +789,6 @@ class PtfBuilder:
 
         ################ Filtrage Bench ################
         df = screen[screen['Weight in ' + self.bench]>0] # on conserve que les weights positifs
-        list_exclusion_bench = screen.loc[~screen.index.isin(df.index)].index.to_list() # For later merge with other list of exclusion
 
         ################ Fixer le nombre de boite à choisir pour plus tard avant que le df soit modifié ################
         if self.percentile > 1:   ##### If percentile is bigger than 1, then this variable means exact number of securities to pick
@@ -878,7 +826,6 @@ class PtfBuilder:
         df.loc[pd.isna(df['Benchmark Market Value Millions in EUR ']),'Benchmark Market Value Millions in EUR '] = func(df.loc[pd.isna(df['Benchmark Market Value Millions in EUR ']),'Weight in ' + self.bench])
         # Market cut filtrage
         df.loc[df['Benchmark Market Value Millions in EUR '] <= self.cut_mkt_cap, list_score_col] = np.nan
-        list_exclusion_market_cut = df[df['Benchmark Market Value Millions in EUR '] <= self.cut_mkt_cap].index.to_list()  # on note les entreprises hors de benchmark, For later merge with other list of exclusion
         
         df = df.copy()
         df.loc[:, 'Date'] = date
@@ -899,9 +846,6 @@ class PtfBuilder:
         # Appilquer les reco sectorielle aux secteurs
         weight_secto_bench = self.adjust_bench_weight_with_recommandation(df, reco_secto, date)
 
-        # Initiate Dataframe for liste exclusion
-        titles_excluded = pd.DataFrame(columns=['Date', "Raison Exclusion"])
-
         # Filtrage ESG only if we choose Top ptf
         if self.Top:
             # if self.score_pivot_esg is string then it will find corresponding item note in excel, 
@@ -912,29 +856,7 @@ class PtfBuilder:
                 self.score_pivot_esg = self.get_esg_pivot_score(bench_name_in_excel = self.score_pivot_esg) 
             if isinstance(self.score_pivot_esg, float):
                 print(f"Score Pivot ESG est {self.score_pivot_esg}")
-            df, titles_excluded = self.filtrage_esg_liste_noire(df,date)  
-
-        # Combine titles_excluded with Market Cut Exclusion
-        default_date = titles_excluded['Date'].iloc[0] if not titles_excluded.empty else date  # Add date for exclusion liste dataframe
-
-        # Create exclusion dataframe for market cut reason
-        new_entries_exclusion = pd.DataFrame({
-            'Date': [default_date] * len(list_exclusion_market_cut),
-            'Raison Exclusion': ['Cut Market'] * len(list_exclusion_market_cut)
-        }, index=list_exclusion_market_cut)
-
-        titles_excluded = pd.concat([titles_excluded, new_entries_exclusion], axis=0) # Concat avec le dataframe de début
-
-        # Create exclusion dataframe for not in bench reason reason
-        new_entries_not_in_bench = pd.DataFrame({
-            'Date': [default_date] * len(list_exclusion_bench),
-            'Raison Exclusion': ["Not in Bnech"] * len(list_exclusion_bench)
-        }, index=list_exclusion_bench)
-
-
-        if not new_entries_not_in_bench.empty and not new_entries_not_in_bench.isna().all().all():
-            titles_excluded = pd.concat([titles_excluded, new_entries_not_in_bench], axis=0)
-            
+            df = self.filtrage_esg_liste_noire(df,date)
 
         df = self.neutralise_score_by_secteur(df, list_score_col) 
 
@@ -961,21 +883,6 @@ class PtfBuilder:
                     # Concat les deux top list
                     df_top_combined = pd.concat([df_top, df_top_sector], axis=0)
                     df_top = df_top_combined[~df_top_combined.index.duplicated(keep='first')]  # Prioritize top selected with classical way
-
-                # Add non selected titles in list exclusion beacause of metrics
-                list_exclusion_metrics = df.loc[~df.index.isin(df_top.index)].index.to_list()
-                new_entries_exclusion = pd.DataFrame({
-                    'Date': [default_date] * len(list_exclusion_metrics),
-                    'Raison Exclusion': [f"Bad {list_score_col[i]}"] * len(list_exclusion_metrics)
-                }, index=list_exclusion_metrics)
-
-                # Append to the existing final_df
-                titles_excluded = pd.concat([titles_excluded, new_entries_exclusion], axis=0)
-                titles_excluded.index.name = "ISIN"
-                if "ISIN" in titles_excluded.columns:
-                    titles_excluded = titles_excluded.drop( columns = ["ISIN"] )
-                titles_excluded = titles_excluded.reset_index()
-
 
             if self.Top == False:
                 df_top=df.nsmallest(nb_securities,list_score_col[i])
@@ -1041,9 +948,7 @@ class PtfBuilder:
         self.sec_list_monthly = result_sec_list.copy(deep=True)
         # print(f"Monthly sec list is generated for {date}, you can check 'self.sec_list_monthly' attribute for more details.")
 
-        self.list_exclusion_monthly = titles_excluded.copy(deep=True)
-
-        return result_sec_list, titles_excluded
+        return result_sec_list
 
     def drift_weight(self, df_rebal, col_id, df_returns, col_date, col_weight, date_fin_drifter):
         """
@@ -1389,12 +1294,9 @@ class PtfBuilder:
         func=self.sec_list_spot
 
         result_sec_list=[]
-        result_exclusion=[]
         from tqdm import tqdm
         for screen in tqdm(screen_list, desc="Generation Sec_list"):
-            result = func(screen_agg_monthly=screen)  # result[0] is sec_list, result[1] is liste exclusion
-            result_sec_list.append(result[0])
-            result_exclusion.append(result[1])
+            result_sec_list.append(func(screen_agg_monthly=screen))
             
         # Concatenate seclist results
         if result_sec_list and isinstance(result_sec_list[0], pd.DataFrame):
@@ -1403,13 +1305,6 @@ class PtfBuilder:
             # Handle the case where func doesn't return DataFrames
             df = pd.DataFrame(result_sec_list)
 
-        # Concatenate exclusion results
-        if result_exclusion and isinstance(result_exclusion[0], pd.DataFrame):
-            df_exclusion = pd.concat(result_exclusion, ignore_index=True)
-        else:
-            # Handle the case where func doesn't return DataFrames
-            df_exclusion = pd.DataFrame(result_exclusion)
-
         # for bimestriel situation
         self.sec_list_historical = df.copy()
         if fill_method=="drift":
@@ -1417,11 +1312,7 @@ class PtfBuilder:
         if fill_method=="copy":
             self.sec_list_historical  = self.update_ptf_with_monthly_additions(self.sec_list_historical)
 
-        self.list_exclusion_histo = df_exclusion.copy()
-        self.list_exclusion_histo = self.update_ptf_with_monthly_additions(self.list_exclusion_histo)
-
         print(f"Historical sec list is generated, you can check 'self.sec_list_historical' attribute for more details.")
-        print(f"Historical exclusion list is generated, you can check 'self.list_exclusion' attribute for more details.")
         
         return df
     
@@ -2204,17 +2095,37 @@ class PtfBuilder:
         top_bench_ratio = result.get('top_bench_ratio', float('nan'))
         top_worst_ratio = result.get('top_worst_ratio', float('nan'))
 
+        def rebase_frame(frame, start=None, end=None, base_value=100.0):
+            """Rebase chaque série sur la première valeur valide de la fenêtre."""
+            rebased = frame.copy()
+            window = frame.loc[start:end] if start is not None or end is not None else frame
+            for column in frame.columns:
+                valid = window[column].dropna()
+                valid = valid[valid.ne(0)]
+                if not valid.empty:
+                    rebased[column] = frame[column] / valid.iloc[0] * base_value
+            return rebased
+
+        displayed_performance = rebase_frame(performance, base_value=100.0)
+        displayed_ratios = rebase_frame(ratios, base_value=1.0)
+        default_title = (
+            f"{title if title else 'Comparaison Top/Worst'} | "
+            f"Score de robustesse : {robust_score:.4f} | "
+            f"T/B: {top_bench_ratio:.4f} | "
+            f"T/W: {top_worst_ratio:.4f}"
+        )
+
         fig = make_subplots(
             rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.1,
             subplot_titles=('Performance cumulée', 'Ratios relatifs'),
         )
 
         colors = {'Top': 'blue', 'Worst': 'orange', 'Bench': 'black'}
-        for column in performance.columns:
+        for column in displayed_performance.columns:
             fig.add_trace(
                 go.Scatter(
-                    x=performance.index,
-                    y=performance[column],
+                    x=displayed_performance.index,
+                    y=displayed_performance[column],
                     mode='lines',
                     name=column,
                     line=dict(width=2, color=colors[column]),
@@ -2227,11 +2138,11 @@ class PtfBuilder:
             'Worst/Bench': 'orange',
             'Top/Worst': 'green',
         }
-        for column in ratios.columns:
+        for column in displayed_ratios.columns:
             fig.add_trace(
                 go.Scatter(
-                    x=ratios.index,
-                    y=ratios[column],
+                    x=displayed_ratios.index,
+                    y=displayed_ratios[column],
                     mode='lines',
                     name=f'Ratio {column}',
                     line=dict(width=2, color=ratio_colors.get(column)),
@@ -2240,12 +2151,7 @@ class PtfBuilder:
             )
 
         fig.update_layout(
-            title=(
-                f"{title if title else 'Comparaison Top/Worst'} | "
-                f"Score de robustesse : {robust_score:.4f} | "
-                f"T/B: {top_bench_ratio:.4f} | "
-                f"T/W: {top_worst_ratio:.4f}"
-            ),
+            title=default_title,
             width=800,
             height=700,
             template='plotly_white',
@@ -2256,7 +2162,32 @@ class PtfBuilder:
         )
 
         # Le menu conserve une seule figure interactive tout en changeant la fenêtre analysée.
-        period_buttons = []
+        default_y = [
+            displayed_performance[column].tolist()
+            for column in displayed_performance.columns
+        ] + [
+            displayed_ratios[column].tolist()
+            for column in displayed_ratios.columns
+        ]
+        default_x = [
+            displayed_performance.index.tolist()
+            for _ in displayed_performance.columns
+        ] + [
+            displayed_ratios.index.tolist()
+            for _ in displayed_ratios.columns
+        ]
+        period_buttons = [{
+            'label': 'Période totale',
+            'method': 'update',
+            'args': [
+                {'x': default_x, 'y': default_y},
+                {
+                    'xaxis.autorange': True,
+                    'xaxis2.autorange': True,
+                    'title.text': default_title,
+                },
+            ],
+        }]
         for _, period_row in period_metrics.iterrows():
             actual_start = period_row.get('actual_start_date')
             actual_end = period_row.get('actual_end_date')
@@ -2273,16 +2204,39 @@ class PtfBuilder:
                 f"CAGR actif: {format_percentage(period_row['active_cagr'])} | "
                 f"Top/Worst CAGR: {format_percentage(period_row['top_worst_cagr'])}"
             )
+            period_performance = rebase_frame(
+                performance, start=actual_start, end=actual_end, base_value=100.0,
+            ).loc[actual_start:actual_end]
+            period_ratios = rebase_frame(
+                ratios, start=actual_start, end=actual_end, base_value=1.0,
+            ).loc[actual_start:actual_end]
+            period_y = [
+                period_performance[column].tolist()
+                for column in period_performance.columns
+            ] + [
+                period_ratios[column].tolist()
+                for column in period_ratios.columns
+            ]
+            period_x = [
+                period_performance.index.tolist()
+                for _ in period_performance.columns
+            ] + [
+                period_ratios.index.tolist()
+                for _ in period_ratios.columns
+            ]
             period_buttons.append({
                 'label': period_row['period_label'],
-                'method': 'relayout',
-                'args': [{
-                    'xaxis.range': [actual_start, actual_end],
-                    'xaxis2.range': [actual_start, actual_end],
-                    'title.text': period_title,
-                }],
+                'method': 'update',
+                'args': [
+                    {'x': period_x, 'y': period_y},
+                    {
+                        'xaxis.autorange': True,
+                        'xaxis2.autorange': True,
+                        'title.text': period_title,
+                    },
+                ],
             })
-        if period_buttons:
+        if len(period_buttons) > 1:
             fig.update_layout(
                 updatemenus=[{
                     'buttons': period_buttons,

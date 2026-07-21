@@ -10,6 +10,7 @@ import json
 import re
 from datetime import datetime
 from pathlib import Path
+from uuid import uuid4
 
 import numpy as np
 import pandas as pd
@@ -48,6 +49,10 @@ PERIOD_SUMMARY_METRICS = (
 # 2020 pour la pandémie, 2022 pour le régime inflationniste et 2024 pour la normalisation.
 # Ajoutez 2009 si les données couvrent aussi la période précédant la crise financière.
 RECOMMENDED_PERIOD_BREAKPOINTS = [2020, 2022, 2024]
+
+
+_BENCHMARK_PERFORMANCE_CACHE = {}
+_DATA_SOURCE_TOKEN = '_backtest_source_token'
 
 
 # Exemple de configuration : les catégories métier ne déterminent pas le flux.
@@ -183,6 +188,169 @@ SIGNAL_CONFIG = {
         'use_diff': False, 'weight_diff': 0.0,
     },
 }
+
+
+def _config_variables(signal_config):
+    """Retourne les variables et dénominateurs demandés par une configuration."""
+    if signal_config is None:
+        return []
+    if isinstance(signal_config, dict):
+        columns = list(signal_config)
+        columns.extend(
+            options.get('denominator')
+            for options in signal_config.values()
+            if isinstance(options, dict) and options.get('denominator')
+        )
+        return list(dict.fromkeys(columns))
+    if isinstance(signal_config, (list, tuple, set, pd.Index)):
+        return list(dict.fromkeys(signal_config))
+    raise TypeError('La configuration doit être un dictionnaire ou une liste de variables.')
+
+
+def required_screen_columns(variables=None, signal_config=None,
+                            bench=DEFAULT_BENCHMARK):
+    """Liste les seules colonnes de screen nécessaires à la préparation et au backtest."""
+    columns = [
+        'Date', 'ISIN', 'Company SEDOL',
+        ' Benchmark ICB Supersector ', 'Exchange Country Region',
+        f'Weight in {bench}', 'Benchmark Market Value Millions in EUR ',
+    ]
+    columns.extend([] if variables is None else list(variables))
+    columns.extend(_config_variables(signal_config))
+    return list(dict.fromkeys(columns))
+
+
+def _parquet_columns(path):
+    """Lit uniquement le schéma d'un parquet, sans charger ses données."""
+    try:
+        import pyarrow.parquet as parquet
+    except ImportError as error:
+        raise ImportError(
+            'pyarrow est requis pour sélectionner les colonnes parquet avant lecture.'
+        ) from error
+    return parquet.ParquetFile(path).schema_arrow.names
+
+
+def _set_source_token(data, token):
+    """Attache une identité de source conservée par les copies pandas."""
+    data.attrs[_DATA_SOURCE_TOKEN] = str(token)
+    return data
+
+
+def load_backtest_data(screen_path, returns_path, variables=None, signal_config=None,
+                       bench=DEFAULT_BENCHMARK):
+    """Charge les colonnes utiles du screen et les rendements des membres du benchmark."""
+    screen_path = Path(screen_path)
+    returns_path = Path(returns_path)
+    available_screen_columns = set(_parquet_columns(screen_path))
+    requested_columns = required_screen_columns(
+        variables=variables, signal_config=signal_config, bench=bench,
+    )
+    market_cap_column = 'Benchmark Market Value Millions in EUR '
+    if market_cap_column not in available_screen_columns:
+        requested_columns.remove(market_cap_column)
+        requested_columns.append(market_cap_column.rstrip())
+    missing_columns = [
+        column for column in requested_columns if column not in available_screen_columns
+    ]
+    if missing_columns:
+        raise KeyError(f'Colonnes absentes du screen : {missing_columns}')
+
+    screen = pd.read_parquet(screen_path, columns=requested_columns)
+    weight_column = f'Weight in {bench}'
+    benchmark_sedols = (
+        screen.loc[screen[weight_column].fillna(0).gt(0), 'Company SEDOL']
+        .dropna()
+        .astype(str)
+        .drop_duplicates()
+        .tolist()
+    )
+    available_return_columns = set(_parquet_columns(returns_path))
+    return_columns = [
+        sedol for sedol in benchmark_sedols if sedol in available_return_columns
+    ]
+    if not return_columns:
+        raise ValueError('Aucun SEDOL du benchmark n’est disponible dans les rendements.')
+    returns = pd.read_parquet(returns_path, columns=return_columns)
+
+    screen_stat = screen_path.stat()
+    returns_stat = returns_path.stat()
+    _set_source_token(
+        screen,
+        f'{screen_path.resolve()}:{screen_stat.st_size}:{screen_stat.st_mtime_ns}',
+    )
+    _set_source_token(
+        returns,
+        f'{returns_path.resolve()}:{returns_stat.st_size}:{returns_stat.st_mtime_ns}',
+    )
+    print(
+        f'Données chargées : {len(screen.columns)} colonnes screen et '
+        f'{len(returns.columns)} colonnes de rendements du benchmark.'
+    )
+    return screen, returns
+
+
+def clear_benchmark_performance_cache():
+    """Vide le cache après toute modification des données du benchmark."""
+    _BENCHMARK_PERFORMANCE_CACHE.clear()
+
+
+def _data_source_token(data):
+    """Identifie une source en mémoire tout en gardant le jeton de ses copies."""
+    token = data.attrs.get(_DATA_SOURCE_TOKEN)
+    if token is None:
+        token = f'memory:{uuid4().hex}'
+        data.attrs[_DATA_SOURCE_TOKEN] = token
+    return token
+
+
+def _backtest_inputs(screen, returns, metric, bench):
+    """Réduit les deux tables aux colonnes réellement consommées par le moteur."""
+    if not isinstance(screen, pd.DataFrame) or not isinstance(returns, pd.DataFrame):
+        raise TypeError('screen et returns doivent être des DataFrames pandas.')
+    market_cap_column = 'Benchmark Market Value Millions in EUR '
+    source_market_cap = market_cap_column.rstrip()
+    if market_cap_column not in screen.columns:
+        if source_market_cap not in screen.columns:
+            raise KeyError(f'Colonne requise absente : {market_cap_column}')
+        screen[market_cap_column] = screen[source_market_cap]
+
+    weight_column = f'Weight in {bench}'
+    screen_columns = [
+        'Date', 'Company SEDOL', ' Benchmark ICB Supersector ',
+        weight_column, market_cap_column, metric,
+    ]
+    if 'ISIN' in screen.columns:
+        screen_columns.insert(1, 'ISIN')
+    elif screen.index.name != 'ISIN':
+        raise KeyError('Colonne ou index ISIN absent du screen.')
+    screen_columns = list(dict.fromkeys(screen_columns))
+    missing_columns = [column for column in screen_columns if column not in screen.columns]
+    if missing_columns:
+        raise KeyError(f'Colonnes requises absentes pour le backtest : {missing_columns}')
+
+    benchmark_sedols = set(
+        screen.loc[screen[weight_column].fillna(0).gt(0), 'Company SEDOL']
+        .dropna()
+        .astype(str)
+    )
+    return_columns = [column for column in returns.columns if str(column) in benchmark_sedols]
+    if not return_columns:
+        raise ValueError('Aucun rendement ne correspond aux membres du benchmark.')
+
+    slim_screen = screen.loc[:, screen_columns].copy()
+    slim_returns = returns.loc[:, return_columns].copy()
+    _set_source_token(slim_screen, _data_source_token(screen))
+    _set_source_token(slim_returns, _data_source_token(returns))
+    return slim_screen, slim_returns
+
+
+def _benchmark_cache_key(screen, returns, bench, start_date):
+    """Construit la clé des seules entrées capables de modifier le benchmark."""
+    return (
+        _data_source_token(screen), _data_source_token(returns),
+        str(bench), str(pd.Timestamp(start_date).date()),
+    )
 
 
 def handle_missing_values(df, columns, group_cols=None):
@@ -366,28 +534,37 @@ def summarize_component_weights(components):
 def run_top_worst_backtest(screen, returns, metric, list_noire_path, bench=DEFAULT_BENCHMARK,
                            percentile=DEFAULT_PERCENTILE, show_plot=True,
                            save_path=None, metadata=None, period_breakpoints=None,
-                           build_figure=True):
+                           build_figure=True, use_benchmark_cache=True):
     """Exécute un backtest Top/Worst pour une variable déjà disponible dans screen."""
-    market_cap_column = 'Benchmark Market Value Millions in EUR '
-    if market_cap_column not in screen.columns:
-        source_column = market_cap_column.rstrip()
-        if source_column not in screen.columns:
-            raise KeyError(f'Colonne requise absente : {market_cap_column}')
-        screen[market_cap_column] = screen[source_column]
+    backtest_screen, backtest_returns = _backtest_inputs(
+        screen, returns, metric=metric, bench=bench,
+    )
+    cache_key = _benchmark_cache_key(
+        backtest_screen, backtest_returns, bench, DEFAULT_START_DATE,
+    )
+    cached_benchmark = (
+        _BENCHMARK_PERFORMANCE_CACHE.get(cache_key)
+        if use_benchmark_cache else None
+    )
     resolved_breakpoints = list(
         RECOMMENDED_PERIOD_BREAKPOINTS
         if period_breakpoints is None else period_breakpoints
     )
     builder_top = PtfBuilder(
-        screen, returns, ptf_name=f'{metric}_top', bench=bench,
+        backtest_screen, backtest_returns, ptf_name=f'{metric}_top', bench=bench,
         percentile=percentile, esg_exclusion=0, liste_noire=list_noire_path,
         metrics=metric, Top=True,
     )
     builder_worst = PtfBuilder(
-        screen, returns, ptf_name=f'{metric}_worst', bench=bench,
+        backtest_screen, backtest_returns, ptf_name=f'{metric}_worst', bench=bench,
         percentile=percentile, esg_exclusion=0, liste_noire=list_noire_path,
         metrics=metric, Top=False,
     )
+
+    if cached_benchmark is not None:
+        builder_top.perf_bench = cached_benchmark.copy()
+        builder_worst.perf_bench = cached_benchmark.copy()
+        print('Performance du benchmark réutilisée depuis le cache.')
 
     for builder in (builder_top, builder_worst):
         builder.start_date = pd.Timestamp(DEFAULT_START_DATE)
@@ -398,6 +575,9 @@ def run_top_worst_backtest(screen, returns, metric, list_noire_path, bench=DEFAU
         builder_bottom=builder_worst,
         period_breakpoints=resolved_breakpoints,
     )
+    if use_benchmark_cache and cached_benchmark is None:
+        _BENCHMARK_PERFORMANCE_CACHE[cache_key] = builder_top.perf_bench.copy()
+        print('Performance du benchmark calculée puis mise en cache.')
     print(
         f"Résultats pour {metric} : "
         f"score de robustesse {comparison['robust_score']:.4f}, "
@@ -427,6 +607,7 @@ def run_top_worst_backtest(screen, returns, metric, list_noire_path, bench=DEFAU
             'frequency_rebalancing': 1,
             'fill_method': 'copy',
             'period_breakpoints': resolved_breakpoints,
+            'benchmark_cache_hit': cached_benchmark is not None,
             'components': [],
         },
     }
@@ -443,39 +624,15 @@ def run_top_worst_backtest(screen, returns, metric, list_noire_path, bench=DEFAU
     return result
 
 
-def test_raw_variables(screen, returns, variables, list_noire_path, **backtest_options):
-    """Teste directement le Top/Worst de chaque variable brute sans configuration."""
-    results = {}
-    for variable in variables:
-        if variable not in screen.columns:
-            print(f'Avertissement : {variable} absent des données. Variable ignorée.')
-            continue
-        print(f'Test de variable brute : {variable}')
-        results[variable] = run_top_worst_backtest(
-            screen, returns, variable, list_noire_path,
-            metadata={
-                'test_type': 'raw',
-                'test_name': variable,
-                'components': [{
-                    'role': 'raw',
-                    'raw_variable': variable,
-                    'prepared_variable': variable,
-                    'derived_variable': variable,
-                    'denominator': None,
-                    'dimension': 'raw',
-                    'higher_is_better': None,
-                    'weight': 1.0,
-                }],
-            },
-            **backtest_options,
-        )
-    return results
-
-
 def test_unitary_signals(screen, returns, signal_config, list_noire_path,
                          dimensions=('level', 'pct', 'diff'), **backtest_options):
-    """Teste séparément les dimensions demandées et les conserve dans screen."""
+    """Teste séparément les dimensions demandées et accepte aussi une simple liste."""
     results = {}
+    if not isinstance(signal_config, dict):
+        signal_config = {
+            variable: {'higher_is_better': True}
+            for variable in _config_variables(signal_config)
+        }
     dimension_options = {
         'level': ('use_level', 'weight_level'),
         'pct': ('use_pct', 'weight_pct'),
@@ -805,6 +962,34 @@ def _load_saved_performances(export_dir):
     return sources
 
 
+def _collect_performance_sources(results=None, export_dir=None):
+    """Réunit les performances du disque et de la mémoire dans un registre unique."""
+    sources = _load_saved_performances(export_dir) if export_dir is not None else {}
+    if results is not None:
+        for test_path, result in _iter_backtest_results(results):
+            performance = result.get('performance')
+            if not isinstance(performance, pd.DataFrame) or performance.empty:
+                continue
+            metadata = result.get('metadata', {})
+            components = metadata.get('components', [])
+            sources[test_path] = {
+                'test_name': metadata.get('test_name') or metadata.get('metric') or test_path,
+                'metadata': metadata,
+                'raw_variables': result.get('raw_variables') or list(dict.fromkeys(
+                    component.get('raw_variable') for component in components
+                )),
+                'raw_variable_weights': (
+                    result.get('raw_variable_weights')
+                    or summarize_component_weights(components)
+                ),
+                'performance': performance.copy(),
+                'origin': 'mémoire',
+            }
+    if not sources:
+        raise ValueError('Aucune performance disponible en mémoire ou dans le dossier exporté.')
+    return sources
+
+
 def _resolve_performance_source(identifier, sources):
     """Résout un chemin de test exact ou un nom de test non ambigu."""
     if identifier in sources:
@@ -878,29 +1063,7 @@ def combine_backtest_performances(results=None, export_dir=None, selections=None
     Avec ``return_composition=True``, la fonction renvoie aussi la table détaillée
     des dimensions, directions, dénominateurs et poids.
     """
-    sources = _load_saved_performances(export_dir) if export_dir is not None else {}
-    if results is not None:
-        for test_path, result in _iter_backtest_results(results):
-            performance = result.get('performance')
-            if not isinstance(performance, pd.DataFrame) or performance.empty:
-                continue
-            metadata = result.get('metadata', {})
-            components = metadata.get('components', [])
-            sources[test_path] = {
-                'test_name': metadata.get('test_name') or metadata.get('metric') or test_path,
-                'metadata': metadata,
-                'raw_variables': result.get('raw_variables') or list(dict.fromkeys(
-                    component.get('raw_variable') for component in components
-                )),
-                'raw_variable_weights': (
-                    result.get('raw_variable_weights')
-                    or summarize_component_weights(components)
-                ),
-                'performance': performance.copy(),
-                'origin': 'mémoire',
-            }
-    if not sources:
-        raise ValueError('Aucune performance disponible en mémoire ou dans le dossier exporté.')
+    sources = _collect_performance_sources(results=results, export_dir=export_dir)
 
     series = {}
     selected_sources = []
@@ -947,6 +1110,72 @@ def combine_backtest_performances(results=None, export_dir=None, selections=None
     if return_composition:
         return combined, composition
     return combined
+
+
+def build_performance_comparison_definitions(results=None, export_dir=None):
+    """Crée automatiquement les sélections et ratios de tous les tests disponibles."""
+    sources = _collect_performance_sources(results=results, export_dir=export_dir)
+    selections = {}
+    labels_by_test = {}
+    benchmark_selection = None
+
+    for test_path, source in sources.items():
+        performance = source['performance']
+        display_path = _performance_display_path(test_path, source)
+        test_labels = {}
+        for portfolio in ('Top', 'Worst'):
+            if portfolio not in performance.columns:
+                continue
+            label = f'{display_path} | {portfolio}'
+            if label in selections:
+                label = f'{label} [{source.get("test_name")}]'
+            selections[label] = (test_path, portfolio)
+            test_labels[portfolio] = label
+        labels_by_test[test_path] = test_labels
+        if benchmark_selection is None and 'Bench' in performance.columns:
+            benchmark_selection = (test_path, 'Bench')
+
+    if benchmark_selection is None:
+        raise KeyError('Aucune performance Benchmark n’est disponible dans les tests.')
+    selections['Benchmark'] = benchmark_selection
+
+    ratio_definitions = {}
+    for test_path, labels in labels_by_test.items():
+        for portfolio in ('Top', 'Worst'):
+            label = labels.get(portfolio)
+            if label:
+                ratio_definitions[f'{label} / Benchmark'] = (label, 'Benchmark')
+        if {'Top', 'Worst'}.issubset(labels):
+            top_label = labels['Top']
+            worst_label = labels['Worst']
+            ratio_definitions[f'{top_label} / Worst'] = (top_label, worst_label)
+    return selections, ratio_definitions
+
+
+def prepare_performance_comparison(results=None, export_dir=None, save_path=None):
+    """Prépare toutes les performances, compositions et ratios sans construire de figure."""
+    selections, ratio_definitions = build_performance_comparison_definitions(
+        results=results, export_dir=export_dir,
+    )
+    performance, composition = combine_backtest_performances(
+        results=results,
+        export_dir=export_dir,
+        selections=selections,
+        save_path=save_path,
+        return_composition=True,
+    )
+    ratios = calculate_performance_ratios(
+        performance,
+        benchmark_column='Benchmark',
+        ratio_definitions=ratio_definitions,
+    )
+    return {
+        'performance': performance,
+        'ratios': ratios,
+        'composition': composition,
+        'performance_selection': selections,
+        'ratio_definitions': ratio_definitions,
+    }
 
 
 def calculate_performance_ratios(performance, benchmark_column='Benchmark',
@@ -1219,12 +1448,26 @@ def reconstruct_backtest_analysis(results=None, export_dir=None, selections=None
     }
 
 
+def _rebase_frame(frame, base_value):
+    """Rebase chaque série sur sa première observation valide et non nulle."""
+    rebased = frame.copy()
+    for column in rebased.columns:
+        valid = rebased[column].dropna()
+        valid = valid[valid.ne(0)]
+        if not valid.empty:
+            rebased[column] = rebased[column] / valid.iloc[0] * base_value
+    return rebased
+
+
 def plot_performance_comparison(performance, ratios, benchmark_column='Benchmark',
                                 title='Comparaison des performances',
-                                save_path=None, show_plot=True):
+                                save_path=None, show_plot=True, rebase=True):
     """Trace en Plotly des performances et ratios déjà calculés."""
     if benchmark_column not in performance.columns:
         raise KeyError(f'Benchmark « {benchmark_column} » absent des performances.')
+    if rebase:
+        performance = _rebase_frame(performance, base_value=100.0)
+        ratios = _rebase_frame(ratios, base_value=1.0)
 
     fig = make_subplots(
         rows=2,
