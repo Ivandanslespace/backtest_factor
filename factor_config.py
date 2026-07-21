@@ -3,6 +3,7 @@
 Les listes sont prêtes à être importées dans un notebook. Elles restent séparées
 des réglages de backtest : ce fichier décrit les familles et fournit seulement
 une configuration large par défaut, modifiable dans une cellule du notebook.
+Une dimension est active uniquement lorsque son poids est strictement positif.
 """
 
 from copy import deepcopy
@@ -333,9 +334,9 @@ def make_signal_config(*families, variables=None, transformations=('level',)):
     for variable in selected_variables:
         options = {'higher_is_better': variable not in LOWER_IS_BETTER}
         for transformation in ('level', 'pct', 'diff'):
-            enabled = transformation in transformations
-            options[f'use_{transformation}'] = enabled
-            options[f'weight_{transformation}'] = 1.0 if enabled else 0.0
+            options[f'weight_{transformation}'] = (
+                1.0 if transformation in transformations else 0.0
+            )
         config[variable] = options
     return config
 

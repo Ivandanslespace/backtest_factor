@@ -55,137 +55,95 @@ _BENCHMARK_PERFORMANCE_CACHE = {}
 _DATA_SOURCE_TOKEN = '_backtest_source_token'
 
 
-# Exemple de configuration : les catégories métier ne déterminent pas le flux.
+# Exemple de configuration : un poids strictement positif active la dimension ; zéro la désactive.
 SIGNAL_CONFIG = {
     'Quality Avg Percentile': {
         'higher_is_better': True,
-        'use_level': True, 'weight_level': 1.0,
-        'use_pct': True, 'weight_pct': 1.0,
-        'use_diff': False, 'weight_diff': 0.0,
+        'weight_level': 1.0, 'weight_pct': 1.0, 'weight_diff': 0.0,
     },
     'Revenue 5Y CAGR': {
         'higher_is_better': True,
-        'use_level': True, 'weight_level': 1.0,
-        'use_pct': False, 'weight_pct': 0.0,
-        'use_diff': False, 'weight_diff': 0.0,
+        'weight_level': 1.0, 'weight_pct': 0.0, 'weight_diff': 0.0,
     },
     'Sales Growth FY1 CIQ': {
         'higher_is_better': True,
-        'use_level': True, 'weight_level': 1.0,
-        'use_pct': False, 'weight_pct': 0.0,
-        'use_diff': False, 'weight_diff': 0.0,
+        'weight_level': 1.0, 'weight_pct': 0.0, 'weight_diff': 0.0,
     },
     'Ebitda 5Y CAGR': {
         'higher_is_better': True,
-        'use_level': True, 'weight_level': 1.0,
-        'use_pct': False, 'weight_pct': 0.0,
-        'use_diff': False, 'weight_diff': 0.0,
+        'weight_level': 1.0, 'weight_pct': 0.0, 'weight_diff': 0.0,
     },
     'EBITDA Growth FY1 CIQ': {
         'higher_is_better': True,
-        'use_level': True, 'weight_level': 1.0,
-        'use_pct': False, 'weight_pct': 0.0,
-        'use_diff': False, 'weight_diff': 0.0,
+        'weight_level': 1.0, 'weight_pct': 0.0, 'weight_diff': 0.0,
     },
     'Ebit 5Y CAGR': {
         'higher_is_better': True,
-        'use_level': True, 'weight_level': 1.0,
-        'use_pct': False, 'weight_pct': 0.0,
-        'use_diff': False, 'weight_diff': 0.0,
+        'weight_level': 1.0, 'weight_pct': 0.0, 'weight_diff': 0.0,
     },
     'EPS Growth FY1 CIQ': {
         'higher_is_better': True,
-        'use_level': True, 'weight_level': 1.0,
-        'use_pct': False, 'weight_pct': 0.0,
-        'use_diff': False, 'weight_diff': 0.0,
+        'weight_level': 1.0, 'weight_pct': 0.0, 'weight_diff': 0.0,
     },
     'SP Est 5Y EPS Gr CIQ': {
         'higher_is_better': True,
-        'use_level': True, 'weight_level': 1.0,
-        'use_pct': False, 'weight_pct': 0.0,
-        'use_diff': False, 'weight_diff': 0.0,
+        'weight_level': 1.0, 'weight_pct': 0.0, 'weight_diff': 0.0,
     },
     'CFO 5Y CAGR': {
         'higher_is_better': True,
-        'use_level': True, 'weight_level': 1.0,
-        'use_pct': False, 'weight_pct': 0.0,
-        'use_diff': False, 'weight_diff': 0.0,
+        'weight_level': 1.0, 'weight_pct': 0.0, 'weight_diff': 0.0,
     },
     'FCF Conversion': {
         'higher_is_better': True,
-        'use_level': True, 'weight_level': 1.0,
-        'use_pct': False, 'weight_pct': 0.0,
-        'use_diff': True, 'weight_diff': 1.0,
+        'weight_level': 1.0, 'weight_pct': 0.0, 'weight_diff': 1.0,
     },
     'Gross Profit 5Y CAGR': {
         'higher_is_better': True,
-        'use_level': True, 'weight_level': 1.0,
-        'use_pct': False, 'weight_pct': 0.0,
-        'use_diff': False, 'weight_diff': 0.0,
+        'weight_level': 1.0, 'weight_pct': 0.0, 'weight_diff': 0.0,
     },
     'Const Earning 5Y CAGR': {
         'higher_is_better': True,
-        'use_level': False, 'weight_level': 0.0,
-        'use_pct': False, 'weight_pct': 0.0,
-        'use_diff': True, 'weight_diff': 1.0,
+        'weight_level': 0.0, 'weight_pct': 0.0, 'weight_diff': 1.0,
     },
     'Gross Margin': {
         'higher_is_better': True,
-        'use_level': True, 'weight_level': 1.0,
-        'use_pct': False, 'weight_pct': 0.0,
-        'use_diff': False, 'weight_diff': 0.0,
+        'weight_level': 1.0, 'weight_pct': 0.0, 'weight_diff': 0.0,
     },
     'Ebitda Margin': {
         'higher_is_better': True,
-        'use_level': True, 'weight_level': 1.0,
-        'use_pct': False, 'weight_pct': 0.0,
-        'use_diff': False, 'weight_diff': 0.0,
+        'weight_level': 1.0, 'weight_pct': 0.0, 'weight_diff': 0.0,
     },
     'Cont Op Earning Margin': {
         'higher_is_better': True,
-        'use_level': False, 'weight_level': 0.0,
-        'use_pct': False, 'weight_pct': 0.0,
-        'use_diff': True, 'weight_diff': 1.0,
+        'weight_level': 0.0, 'weight_pct': 0.0, 'weight_diff': 1.0,
     },
     'R&D Expense CIQ': {
         'higher_is_better': True,
         'denominator': 'Sales',
-        'use_level': True, 'weight_level': 1.0,
-        'use_pct': False, 'weight_pct': 0.0,
-        'use_diff': False, 'weight_diff': 0.0,
+        'weight_level': 1.0, 'weight_pct': 0.0, 'weight_diff': 0.0,
     },
     'Capex CIQ': {
         'higher_is_better': True,
         'denominator': 'Sales',
-        'use_level': True, 'weight_level': 1.0,
-        'use_pct': False, 'weight_pct': 0.0,
-        'use_diff': False, 'weight_diff': 0.0,
+        'weight_level': 1.0, 'weight_pct': 0.0, 'weight_diff': 0.0,
     },
     'Sales FY1': {
         'higher_is_better': True,
         'denominator': 'Sales',
-        'use_level': True, 'weight_level': 1.0,
-        'use_pct': False, 'weight_pct': 0.0,
-        'use_diff': False, 'weight_diff': 0.0,
+        'weight_level': 1.0, 'weight_pct': 0.0, 'weight_diff': 0.0,
     },
     'Net Debt to Ebit': {
         'higher_is_better': False,
-        'use_level': False, 'weight_level': 0.0,
-        'use_pct': False, 'weight_pct': 0.0,
-        'use_diff': True, 'weight_diff': 1.0,
+        'weight_level': 0.0, 'weight_pct': 0.0, 'weight_diff': 1.0,
     },
     'Net Debt to Tot Equity': {
         'higher_is_better': False,
-        'use_level': True, 'weight_level': 1.0,
-        'use_pct': False, 'weight_pct': 0.0,
-        'use_diff': True, 'weight_diff': 1.0,
+        'weight_level': 1.0, 'weight_pct': 0.0, 'weight_diff': 1.0,
     },
     'Interest expense CIQ': {
         'higher_is_better': False,
         'denominator': 'Ebitda',
-        'use_level': True, 'weight_level': 1.0,
-        'use_pct': False, 'weight_pct': 0.0,
-        'use_diff': False, 'weight_diff': 0.0,
+        'weight_level': 1.0, 'weight_pct': 0.0, 'weight_diff': 0.0,
     },
 }
 
@@ -400,19 +358,32 @@ def prepare_signals(screen, signal_config, group_cols=None, copy_data=False):
     return handle_missing_values(prepared, prepared_cols, group_cols), resolved_config
 
 
+def _component_weight(options, dimension):
+    """Retourne un poids positif ; zéro, une valeur absente ou négative désactive la dimension."""
+    weight = options.get(f'weight_{dimension}', 0.0)
+    try:
+        weight = float(weight)
+    except (TypeError, ValueError) as error:
+        raise ValueError(
+            f'Le poids {dimension} doit être numérique : {weight}'
+        ) from error
+    return weight if pd.notna(weight) and weight > 0 else 0.0
+
+
 def build_signal_component(screen, variable, options, group_cols=None, keep_derived_columns=True):
     """Construit les composantes niveau, variation relative et variation absolue."""
     group_cols = GROUP_COLS if group_cols is None else group_cols
     contribution = pd.Series(0.0, index=screen.index)
 
     components = (
-        ('level', variable, options.get('use_level', False), options.get('weight_level', 0.0)),
-        ('pct', f'{variable}__pct', options.get('use_pct', False), options.get('weight_pct', 0.0)),
-        ('diff', f'{variable}__diff', options.get('use_diff', False), options.get('weight_diff', 0.0)),
+        ('level', variable),
+        ('pct', f'{variable}__pct'),
+        ('diff', f'{variable}__diff'),
     )
 
-    for component, column, enabled, weight in components:
-        if not enabled:
+    for component, column in components:
+        weight = _component_weight(options, component)
+        if weight == 0:
             continue
         if component in ('pct', 'diff'):
             isin_values = (
@@ -461,7 +432,10 @@ def calculate_composite_score(screen, score_col, signal_config, group_cols=None,
     active_signals = 0
 
     for variable, options in resolved_config.items():
-        if not any(options.get(f'use_{component}', False) for component in ('level', 'pct', 'diff')):
+        if not any(
+            _component_weight(options, component) > 0
+            for component in ('level', 'pct', 'diff')
+        ):
             continue
         prepared, contribution = build_signal_component(
             prepared, variable, options, group_cols,
@@ -486,7 +460,8 @@ def describe_signal_config(signal_config, role='signal'):
             f'{raw_variable}__over__{denominator}' if denominator else raw_variable
         )
         for dimension in ('level', 'pct', 'diff'):
-            if not options.get(f'use_{dimension}', False):
+            weight = _component_weight(options, dimension)
+            if weight == 0:
                 continue
             derived_variable = (
                 prepared_variable if dimension == 'level'
@@ -500,7 +475,7 @@ def describe_signal_config(signal_config, role='signal'):
                 'denominator': denominator,
                 'dimension': dimension,
                 'higher_is_better': options.get('higher_is_better'),
-                'weight': options.get(f'weight_{dimension}', 0.0),
+                'weight': weight,
             })
     return components
 
@@ -634,9 +609,9 @@ def test_unitary_signals(screen, returns, signal_config, list_noire_path,
             for variable in _config_variables(signal_config)
         }
     dimension_options = {
-        'level': ('use_level', 'weight_level'),
-        'pct': ('use_pct', 'weight_pct'),
-        'diff': ('use_diff', 'weight_diff'),
+        'level': 'weight_level',
+        'pct': 'weight_pct',
+        'diff': 'weight_diff',
     }
 
     for variable, options in signal_config.items():
@@ -644,16 +619,13 @@ def test_unitary_signals(screen, returns, signal_config, list_noire_path,
         if variable not in screen.columns or (denominator and denominator not in screen.columns):
             print(f'Avertissement : données insuffisantes pour {variable}. Signal ignoré.')
             continue
-        for label, (enabled_key, weight_key) in dimension_options.items():
+        for label, weight_key in dimension_options.items():
             if label not in dimensions:
                 continue
 
             unitary_options = copy.deepcopy(options)
-            for key in ('use_level', 'use_pct', 'use_diff'):
-                unitary_options[key] = False
             for key in ('weight_level', 'weight_pct', 'weight_diff'):
                 unitary_options[key] = 0.0
-            unitary_options[enabled_key] = True
             unitary_options[weight_key] = 1.0
 
             metric = f'Unitary_{label}_{variable}'
