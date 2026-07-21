@@ -57,6 +57,7 @@ SIGNAL_CONFIG = {
     'Quality Avg Percentile': {
         'higher_is_better': True,
         'weight_level': 1.0, 'weight_pct': 1.0, 'weight_diff': 0.0,
+        'weight_rank_diff': 0.0,
     },
     'Revenue 5Y CAGR': {
         'higher_is_better': True,
@@ -309,7 +310,7 @@ def neutralize_score(df, score_col, higher_is_better, group_cols=None):
 def _raw_variable_name(variable):
     """Retrouve la variable brute derrière une colonne dérivée connue."""
     raw_variable = str(variable)
-    for suffix in ('__pct', '__diff'):
+    for suffix in ('__pct', '__diff', '__rank_diff'):
         if raw_variable.endswith(suffix):
             raw_variable = raw_variable[:-len(suffix)]
     return raw_variable.split('__over__', 1)[0]
@@ -317,6 +318,8 @@ def _raw_variable_name(variable):
 
 def _default_higher_is_better(variable):
     """Déduit la direction d'une variable à partir du catalogue central."""
+    if str(variable).endswith('__rank_diff'):
+        return True
     return _raw_variable_name(variable) not in LOWER_IS_BETTER
 
 
@@ -383,7 +386,7 @@ def _component_weight(options, dimension):
 
 
 def build_signal_component(screen, variable, options, group_cols=None, keep_derived_columns=True):
-    """Construit les composantes niveau, variation relative et variation absolue."""
+    """Construit le niveau, les variations de valeur et la variation de rang."""
     group_cols = GROUP_COLS if group_cols is None else group_cols
     contribution = pd.Series(0.0, index=screen.index)
 
@@ -391,22 +394,29 @@ def build_signal_component(screen, variable, options, group_cols=None, keep_deri
         ('level', variable),
         ('pct', f'{variable}__pct'),
         ('diff', f'{variable}__diff'),
+        ('rank_diff', f'{variable}__rank_diff'),
     )
 
     for component, column in components:
         weight = _component_weight(options, component)
         if weight == 0:
             continue
-        if component in ('pct', 'diff'):
+        if component in ('pct', 'diff', 'rank_diff'):
             isin_values = (
                 screen['ISIN'].to_numpy()
                 if 'ISIN' in screen.columns else screen.index.to_numpy()
             )
+            source_values = screen[variable]
+            if component == 'rank_diff':
+                source_values = (
+                    screen.groupby(group_cols)[variable]
+                    .rank(pct=True, ascending=options['higher_is_better']) * 10
+                )
             ordered = pd.DataFrame({
                 '_position': np.arange(len(screen)),
                 '_isin': isin_values,
                 '_date': pd.to_datetime(screen['Date']).to_numpy(),
-                '_value': screen[variable].to_numpy(),
+                '_value': source_values.to_numpy(),
             }).sort_values(['_isin', '_date'])
             if component == 'pct':
                 filled_values = ordered.groupby('_isin')['_value'].ffill()
@@ -423,7 +433,10 @@ def build_signal_component(screen, variable, options, group_cols=None, keep_deri
         screen = handle_missing_values(screen, [column], group_cols)
         score_col = f'{column}__score'
         screen[score_col] = screen[column]
-        screen = neutralize_score(screen, score_col, options['higher_is_better'], group_cols)
+        component_direction = (
+            True if component == 'rank_diff' else options['higher_is_better']
+        )
+        screen = neutralize_score(screen, score_col, component_direction, group_cols)
         contribution = contribution.add(screen[score_col] * weight, fill_value=0.0)
 
         if component != 'level' and not keep_derived_columns:
@@ -447,7 +460,7 @@ def calculate_composite_score(screen, score_col, signal_config, group_cols=None,
     for variable, options in resolved_config.items():
         if not any(
             _component_weight(options, component) > 0
-            for component in ('level', 'pct', 'diff')
+            for component in ('level', 'pct', 'diff', 'rank_diff')
         ):
             continue
         prepared, contribution = build_signal_component(
@@ -472,7 +485,7 @@ def describe_signal_config(signal_config, role='signal'):
         prepared_variable = (
             f'{raw_variable}__over__{denominator}' if denominator else raw_variable
         )
-        for dimension in ('level', 'pct', 'diff'):
+        for dimension in ('level', 'pct', 'diff', 'rank_diff'):
             weight = _component_weight(options, dimension)
             if weight == 0:
                 continue
@@ -487,7 +500,11 @@ def describe_signal_config(signal_config, role='signal'):
                 'derived_variable': derived_variable,
                 'denominator': denominator,
                 'dimension': dimension,
-                'higher_is_better': options.get('higher_is_better'),
+                'higher_is_better': (
+                    True if dimension == 'rank_diff'
+                    else options.get('higher_is_better')
+                ),
+                'source_higher_is_better': options.get('higher_is_better'),
                 'weight': weight,
             })
     return components
@@ -504,6 +521,7 @@ def summarize_component_weights(components):
             'weight_level': 0.0,
             'weight_pct': 0.0,
             'weight_diff': 0.0,
+            'weight_rank_diff': 0.0,
             'total_weight': 0.0,
             'absolute_weight': 0.0,
             'absolute_weight_share': 0.0,
@@ -600,7 +618,8 @@ def run_top_worst_backtest(screen, returns, metric, list_noire_path, bench=DEFAU
 
 
 def test_unitary_signals(screen, returns, signal_config, list_noire_path,
-                         dimensions=('level', 'pct', 'diff'), **backtest_options):
+                         dimensions=('level', 'pct', 'diff', 'rank_diff'),
+                         **backtest_options):
     """Teste séparément les dimensions et retourne un lot standardisé."""
     if not isinstance(signal_config, dict):
         signal_config = {
@@ -614,6 +633,7 @@ def test_unitary_signals(screen, returns, signal_config, list_noire_path,
         'level': 'weight_level',
         'pct': 'weight_pct',
         'diff': 'weight_diff',
+        'rank_diff': 'weight_rank_diff',
     }
 
     for variable, options in signal_config.items():
@@ -622,7 +642,9 @@ def test_unitary_signals(screen, returns, signal_config, list_noire_path,
                 continue
 
             unitary_options = copy.deepcopy(options)
-            for key in ('weight_level', 'weight_pct', 'weight_diff'):
+            for key in (
+                'weight_level', 'weight_pct', 'weight_diff', 'weight_rank_diff',
+            ):
                 unitary_options[key] = 0.0
             unitary_options[weight_key] = 1.0
 

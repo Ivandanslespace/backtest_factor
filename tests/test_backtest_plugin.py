@@ -5,7 +5,7 @@ import pandas as pd
 
 import func
 from BacktestEngine import PtfBuilder
-from factor_config import signal_options
+from factor_config import make_signal_config, signal_options
 
 
 def _screen_minimal():
@@ -71,6 +71,46 @@ class TestConfigurationSignaux(unittest.TestCase):
         result = batch['results']['Mixte']
         self.assertEqual(result['raw_variables'], ['Revenue 5Y CAGR'])
         self.assertNotIn('Variable absente', result['composition']['raw_variable'].tolist())
+
+    def test_rank_diff_mesure_l_amelioration_du_rang_oriente(self):
+        dates = pd.to_datetime(['2024-01-31', '2024-02-29'])
+        values = {
+            'A': ((1.0, 3.0), 'Industrials'),
+            'B': ((2.0, 2.0), 'Industrials'),
+            'C': ((3.0, 1.0), 'Industrials'),
+            'D': ((1000.0, 0.0), 'Banks'),
+        }
+        rows = []
+        for isin, (observations, industry) in values.items():
+            for date, value in zip(dates, observations):
+                rows.append({
+                    'ISIN': isin,
+                    'Date': date,
+                    ' Benchmark ICB Supersector ': industry,
+                    'Exchange Country Region': 'Europe',
+                    'Net Debt to Ebit': value,
+                })
+        screen = pd.DataFrame(rows)
+        config = {
+            'Net Debt to Ebit': signal_options(
+                higher_is_better=False, rank_diff=1.0,
+            ),
+        }
+
+        scored = func.calculate_composite_score(screen, 'Score_Rank', config)
+        latest = scored.loc[scored['Date'].eq(dates[-1])].set_index('ISIN')
+        composition = func.describe_signal_config(config)
+
+        self.assertLess(latest.loc['A', 'Net Debt to Ebit__rank_diff'], 0)
+        self.assertGreater(latest.loc['C', 'Net Debt to Ebit__rank_diff'], 0)
+        self.assertEqual(latest.loc['D', 'Net Debt to Ebit__rank_diff'], 0)
+        self.assertLess(latest.loc['A', 'Score_Rank'], latest.loc['C', 'Score_Rank'])
+        self.assertTrue(composition[0]['higher_is_better'])
+        self.assertFalse(composition[0]['source_higher_is_better'])
+        generated = make_signal_config(
+            variables=['Net Debt to Ebit'], transformations=('rank_diff',),
+        )
+        self.assertEqual(generated['Net Debt to Ebit']['weight_rank_diff'], 1.0)
 
 
 class TestLotsStandardises(unittest.TestCase):

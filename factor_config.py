@@ -320,13 +320,14 @@ def factor_columns(*families):
 
 
 def signal_options(higher_is_better=True, level=0.0, pct=0.0, diff=0.0,
-                   denominator=None):
+                   denominator=None, rank_diff=0.0):
     """Décrit un signal compact avec uniquement sa direction et ses poids actifs."""
     options = {
         'higher_is_better': higher_is_better,
         'weight_level': level,
         'weight_pct': pct,
         'weight_diff': diff,
+        'weight_rank_diff': rank_diff,
     }
     if denominator is not None:
         options['denominator'] = denominator
@@ -340,14 +341,16 @@ def make_signal_config(*families, variables=None, transformations=('level',)):
     selected_variables = (
         list(variables) if variables is not None else factor_columns(*families)
     )
-    unknown_transformations = set(transformations) - {'level', 'pct', 'diff'}
+    unknown_transformations = set(transformations) - {
+        'level', 'pct', 'diff', 'rank_diff',
+    }
     if unknown_transformations:
         raise ValueError(f'Transformations inconnues : {sorted(unknown_transformations)}')
 
     config = {}
     for variable in selected_variables:
         options = {'higher_is_better': variable not in LOWER_IS_BETTER}
-        for transformation in ('level', 'pct', 'diff'):
+        for transformation in ('level', 'pct', 'diff', 'rank_diff'):
             options[f'weight_{transformation}'] = (
                 1.0 if transformation in transformations else 0.0
             )
