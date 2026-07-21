@@ -319,6 +319,20 @@ def factor_columns(*families):
     ))
 
 
+def signal_options(higher_is_better=True, level=0.0, pct=0.0, diff=0.0,
+                   denominator=None):
+    """Décrit un signal compact avec uniquement sa direction et ses poids actifs."""
+    options = {
+        'higher_is_better': higher_is_better,
+        'weight_level': level,
+        'weight_pct': pct,
+        'weight_diff': diff,
+    }
+    if denominator is not None:
+        options['denominator'] = denominator
+    return options
+
+
 def make_signal_config(*families, variables=None, transformations=('level',)):
     """Construit une configuration large avec des poids unitaires modifiables."""
     if variables is not None and families:

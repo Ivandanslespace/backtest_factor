@@ -693,25 +693,57 @@ def test_incremental_signals(screen, returns, baseline_config, candidate_config,
 
 
 def test_composite_signal(screen, returns, score_col, signal_config,
-                          list_noire_path, **backtest_options):
+                          list_noire_path, test_name=None,
+                          copy_screen_result=True, **backtest_options):
     """Construit puis teste un score composite tout en enregistrant sa composition."""
     scored_screen = calculate_composite_score(screen, score_col, signal_config)
     backtest_result = run_top_worst_backtest(
         scored_screen, returns, score_col, list_noire_path,
         metadata={
             'test_type': 'composite',
-            'test_name': score_col,
+            'test_name': test_name or score_col,
             'components': describe_signal_config(signal_config, role='composite'),
         },
         **backtest_options,
     )
     return {
-        'screen': scored_screen.copy(),
+        'screen': scored_screen.copy() if copy_screen_result else scored_screen,
         'composition': backtest_result['composition'].copy(),
         'raw_variables': copy.deepcopy(backtest_result['raw_variables']),
         'raw_variable_weights': copy.deepcopy(backtest_result['raw_variable_weights']),
         'backtest': backtest_result,
     }
+
+
+def test_composite_signals(screen, returns, composite_configs, list_noire_path,
+                           score_prefix='Score_Composite', **backtest_options):
+    """Construit et teste plusieurs recettes composites indépendantes."""
+    if not isinstance(composite_configs, dict) or not composite_configs:
+        raise ValueError('Ajoutez au moins une configuration composite nommée.')
+
+    working_screen = screen
+    results = {}
+    for index, (composite_name, signal_config) in enumerate(composite_configs.items(), start=1):
+        if not isinstance(signal_config, dict) or not signal_config:
+            raise ValueError(
+                f'La configuration composite « {composite_name} » doit contenir des signaux.'
+            )
+        score_col = f'{score_prefix}_{index}_{_safe_filename(composite_name)}'
+        print(f'Test de score composite : {composite_name}')
+        result = test_composite_signal(
+            screen=working_screen,
+            returns=returns,
+            score_col=score_col,
+            signal_config=signal_config,
+            list_noire_path=list_noire_path,
+            test_name=str(composite_name),
+            copy_screen_result=False,
+            **backtest_options,
+        )
+        working_screen = result.pop('screen')
+        results[composite_name] = result
+
+    return {'screen': working_screen, 'results': results}
 
 
 def _iter_backtest_results(results, path=()):
