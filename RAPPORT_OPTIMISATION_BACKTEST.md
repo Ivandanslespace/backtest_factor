@@ -2,6 +2,8 @@
 
 Date de mesure : 22 juillet 2026
 
+Version chinoise : [RAPPORT_OPTIMISATION_BACKTEST_ZH.md](RAPPORT_OPTIMISATION_BACKTEST_ZH.md)
+
 ## 1. Objectif
 
 Cette phase réduit le temps d’exécution et le pic de mémoire d’un backtest complet, sans modifier les positions ni les résultats financiers. Elle complète la première phase, qui avait déjà rendu les résultats légers, libéré les builders après chaque test et supprimé les scores `Unitary_*` temporaires.
@@ -216,7 +218,7 @@ La mesure complète conserve le scénario de la section 6. Les résultats suivan
 
 Les temps isolés restent sensibles au cache disque et à la charge de la machine. Les mesures structurelles les plus fiables sont la réduction du nombre de tris, la taille pandas du screen et la taille du cache mensuel.
 
-Après ces modifications, le contrôle sur l’historique réel complet reste exact pour les performances, les positions Top et Worst, les ratios, les métriques classiques, les métriques par période et tous les scalaires du score robuste. La suite automatisée contient désormais 22 tests et couvre explicitement le tri unique, les types compacts et la réutilisation de la base mensuelle.
+Après ces modifications, le contrôle sur l’historique réel complet reste exact pour les performances, les positions Top et Worst, les ratios, les métriques classiques, les métriques par période et tous les scalaires du score robuste. La suite automatisée contient désormais 27 tests, complétés par deux sous-tests de protection, et couvre explicitement le tri unique, les types compacts, la réutilisation de la base mensuelle et la parallélisation.
 
 ## 14. Comparaison du code avant et après
 
@@ -478,9 +480,18 @@ Le scénario réel de validation utilise quatre signaux `level` sur tout l’his
 
 Le premier signal reste séquentiel afin de préchauffer le cache mensuel ; les trois signaux suivants s’exécutent simultanément. La mesure parallèle inclut la création des processus Windows et la sérialisation des données compactes vers chaque worker.
 
+Un second benchmark, plus proche d’une campagne unitaire courante, utilise dix variables et les quatre dimensions par défaut `level`, `pct_1`, `diff_1` et `rank_diff_1`, soit quarante backtests complets sans figure :
+
+| Lot unitaire de quarante tests | Temps | Accélération de 8 vs 6 | Gain temps de 8 vs 6 |
+|---|---:|---:|---:|
+| `n_jobs=6` | 215,509 s | 1,00× | — |
+| `n_jobs=8` | 132,912 s | **1,62×** | **38,3 %** |
+
+Les quarante résultats restent strictement identiques. Pour ce type de campagne unitaire large, `n_jobs=8` est donc le réglage recommandé sur la machine de mesure. Pour un lot plus court, deux à quatre processus évitent de créer plus de workers que de tâches réellement disponibles.
+
 L’équivalence stricte est confirmée pour les performances, les positions Top et Worst, les ratios, les métriques classiques, les métriques par période et la Composition. La suite automatisée vérifie séparément les lots unitaires, incrémentaux et composites, ainsi que le maintien de l’ordre et le retour des figures Plotly. La validation a également été exécutée depuis un véritable kernel Jupyter sous Windows.
 
-La recommandation générale est de commencer avec `n_jobs=2` à `n_jobs=4`. Chaque processus possède ses propres tables de travail, même si les entrées ont été compactées. `retain_builders=True` et un `save_path` unique sont donc refusés lorsque `n_jobs > 1` ; les résultats doivent être exportés après la réunion du lot.
+Chaque processus possède ses propres tables de travail, même si les entrées ont été compactées. `retain_builders=True` et un `save_path` unique sont donc refusés lorsque `n_jobs > 1` ; les résultats doivent être exportés après la réunion du lot.
 
 ## 17. Limites et prochaines optimisations possibles
 
