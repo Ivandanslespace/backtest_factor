@@ -70,6 +70,13 @@ class TestConfigurationSignaux(unittest.TestCase):
             'Revenue 5Y CAGR | diff_1',
             'Revenue 5Y CAGR | rank_diff_1',
         ])
+        self.assertFalse(any(
+            str(column).startswith('Unitary_')
+            for column in batch['screen'].columns
+        ))
+        self.assertIn('Revenue 5Y CAGR__pct_1', batch['screen'].columns)
+        self.assertIn('Revenue 5Y CAGR__diff_1', batch['screen'].columns)
+        self.assertIn('Revenue 5Y CAGR__rank_diff_1', batch['screen'].columns)
 
     def test_generation_de_toutes_les_dimensions_unitaires(self):
         dimensions = make_signal_dimensions(periods=(1, 3, 6, 12))
@@ -289,7 +296,9 @@ class TestBenchmarkExplicite(unittest.TestCase):
             patch.object(func, '_backtest_inputs', return_value=(
                 pd.DataFrame(), pd.DataFrame(),
             )),
-            patch.object(func, 'PtfBuilder', side_effect=[top, worst]) as constructor,
+            patch.object(
+                func, 'PtfBuilder', side_effect=[top, worst, top, worst],
+            ) as constructor,
         ):
             result = func.run_top_worst_backtest(
                 pd.DataFrame(), pd.DataFrame(), 'Score', None,
@@ -297,6 +306,14 @@ class TestBenchmarkExplicite(unittest.TestCase):
                 start_date='2021-02-03', freq_rebal=3,
                 fill_method='drift', period_breakpoints=[],
                 show_plot=False, build_figure=False,
+            )
+            retained_result = func.run_top_worst_backtest(
+                pd.DataFrame(), pd.DataFrame(), 'Score', None,
+                bench='Benchmark', bench_perf=benchmark,
+                start_date='2021-02-03', freq_rebal=3,
+                fill_method='drift', period_breakpoints=[],
+                show_plot=False, build_figure=False,
+                retain_builders=True,
             )
 
         for call in constructor.call_args_list:
@@ -306,6 +323,12 @@ class TestBenchmarkExplicite(unittest.TestCase):
             self.assertEqual(builder.freq_rebal, 3)
             self.assertEqual(builder.fill_method, 'drift')
         self.assertTrue(result['metadata']['benchmark_performance_provided'])
+        self.assertFalse(result['metadata']['builders_retained'])
+        self.assertNotIn('top_builder', result)
+        self.assertNotIn('worst_builder', result)
+        self.assertTrue(retained_result['metadata']['builders_retained'])
+        self.assertIs(retained_result['top_builder'], top)
+        self.assertIs(retained_result['worst_builder'], worst)
 
 
 class TestReconstructionPeriodes(unittest.TestCase):

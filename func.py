@@ -518,8 +518,8 @@ def run_top_worst_backtest(screen, returns, metric, list_noire_path, bench=DEFAU
                            save_path=None, metadata=None, period_breakpoints=None,
                            build_figure=True, bench_perf=None,
                            start_date=DEFAULT_START_DATE, freq_rebal=1,
-                           fill_method='copy'):
-    """Exécute Top/Worst et réutilise la performance de benchmark fournie."""
+                           fill_method='copy', retain_builders=False):
+    """Exécute Top/Worst et ne conserve les builders que sur demande."""
     backtest_screen, backtest_returns = _backtest_inputs(
         screen, returns, metric=metric, bench=bench,
     )
@@ -564,10 +564,8 @@ def run_top_worst_backtest(screen, returns, metric, list_noire_path, bench=DEFAU
         if should_build_figure else None
     )
     result = {
-        'top_builder': builder_top,
-        'worst_builder': builder_worst,
-        'top_holdings': builder_top.sec_list_historical,
-        'worst_holdings': builder_worst.sec_list_historical,
+        'top_holdings': builder_top.sec_list_historical.copy(deep=True),
+        'worst_holdings': builder_worst.sec_list_historical.copy(deep=True),
         'metadata': {
             'metric': metric,
             'benchmark': bench,
@@ -577,9 +575,15 @@ def run_top_worst_backtest(screen, returns, metric, list_noire_path, bench=DEFAU
             'fill_method': fill_method,
             'period_breakpoints': resolved_breakpoints,
             'benchmark_performance_provided': bench_perf is not None,
+            'builders_retained': bool(retain_builders),
             'components': [],
         },
     }
+    if retain_builders:
+        result.update({
+            'top_builder': builder_top,
+            'worst_builder': builder_worst,
+        })
     if metadata:
         result['metadata'].update(copy.deepcopy(metadata))
     if isinstance(comparison, dict):
@@ -630,7 +634,8 @@ def test_unitary_signals(screen, returns, signal_config, list_noire_path,
             working_screen = calculate_composite_score(
                 working_screen, metric, {variable: unitary_options},
             )
-            results[f'{variable} | {label}'] = run_top_worst_backtest(
+            result_name = f'{variable} | {label}'
+            results[result_name] = run_top_worst_backtest(
                 working_screen, returns, metric, list_noire_path,
                 metadata={
                     'test_type': 'unitary',
@@ -641,6 +646,7 @@ def test_unitary_signals(screen, returns, signal_config, list_noire_path,
                 },
                 **backtest_options,
             )
+            working_screen.drop(columns=[metric], inplace=True)
     return {'screen': working_screen, 'results': results}
 
 
