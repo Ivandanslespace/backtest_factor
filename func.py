@@ -8,6 +8,7 @@ passez-la explicitement aux fonctions de ce module.
 import copy
 import json
 import re
+from concurrent.futures import ProcessPoolExecutor
 from datetime import datetime
 from pathlib import Path
 
@@ -288,6 +289,18 @@ def _ensure_monthly_base_cache(backtest_options):
     if 'monthly_base_cache' in backtest_options:
         return backtest_options
     return {**backtest_options, 'monthly_base_cache': {}}
+
+
+def _bind_monthly_base_cache(screen, monthly_base_cache):
+    """Lie le cache à un screen précis et écarte toute base devenue obsolète."""
+    if monthly_base_cache is None:
+        return
+    if not isinstance(monthly_base_cache, dict):
+        raise TypeError('monthly_base_cache doit être un dictionnaire ou None.')
+    source_id = id(screen)
+    if monthly_base_cache.get('_source_id') != source_id:
+        monthly_base_cache.clear()
+        monthly_base_cache['_source_id'] = source_id
 
 
 def handle_missing_values(df, columns, group_cols=None):
@@ -632,14 +645,7 @@ def run_top_worst_backtest(screen, returns, metric, list_noire_path, bench=DEFAU
                            fill_method='copy', retain_builders=False,
                            monthly_base_cache=None):
     """Exécute Top/Worst et ne conserve les builders que sur demande."""
-    if monthly_base_cache is not None:
-        if not isinstance(monthly_base_cache, dict):
-            raise TypeError('monthly_base_cache doit être un dictionnaire ou None.')
-        source_id = id(screen)
-        cached_source_id = monthly_base_cache.get('_source_id')
-        if cached_source_id != source_id:
-            monthly_base_cache.clear()
-            monthly_base_cache['_source_id'] = source_id
+    _bind_monthly_base_cache(screen, monthly_base_cache)
     backtest_screen, backtest_returns = _backtest_inputs(
         screen, returns, metric=metric, bench=bench,
     )
@@ -725,10 +731,171 @@ def run_top_worst_backtest(screen, returns, metric, list_noire_path, bench=DEFAU
     return result
 
 
+_PARALLEL_BACKTEST_CONTEXT = None
+
+
+def _resolve_n_jobs(n_jobs, task_count):
+    """Valide le nombre de processus et le borne au nombre de tâches."""
+    if isinstance(n_jobs, bool) or not isinstance(n_jobs, int):
+        raise TypeError('n_jobs doit être un entier strictement positif.')
+    if n_jobs < 1:
+        raise ValueError('n_jobs doit être supérieur ou égal à 1.')
+    return min(n_jobs, max(1, int(task_count)))
+
+
+def _execute_backtest_task(screen, returns, task, list_noire_path,
+                           backtest_options):
+    """Calcule éventuellement un score temporaire puis exécute son backtest."""
+    metric = task['metric']
+    score_specification = task.get('score_specification')
+    task_screen = screen
+    if score_specification is not None:
+        task_screen = calculate_composite_score(
+            screen,
+            metric,
+            score_specification['signal_config'],
+            signals_prepared=score_specification.get(
+                'signals_prepared', False,
+            ),
+            precomputed_derivatives=score_specification.get(
+                'precomputed_derivatives',
+            ),
+        )
+    try:
+        return run_top_worst_backtest(
+            task_screen,
+            returns,
+            metric,
+            list_noire_path,
+            metadata=task.get('metadata'),
+            **backtest_options,
+        )
+    finally:
+        if task.get('drop_metric') and metric in task_screen.columns:
+            task_screen.drop(columns=[metric], inplace=True)
+
+
+def _parallel_progress_disabled(iterable, **kwargs):
+    """Supprime les barres mensuelles concurrentes dans les workers."""
+    return iterable
+
+
+def _initialize_parallel_backtest_worker(screen, returns, list_noire_path,
+                                         backtest_options):
+    """Installe une seule copie des données dans chaque processus de travail."""
+    global _PARALLEL_BACKTEST_CONTEXT
+    import tqdm as tqdm_module
+    tqdm_module.tqdm = _parallel_progress_disabled
+    worker_options = dict(backtest_options)
+    monthly_base_cache = worker_options.get('monthly_base_cache')
+    if isinstance(monthly_base_cache, dict):
+        monthly_base_cache['_source_id'] = id(screen)
+    _PARALLEL_BACKTEST_CONTEXT = {
+        'screen': screen,
+        'returns': returns,
+        'list_noire_path': list_noire_path,
+        'backtest_options': worker_options,
+    }
+
+
+def _execute_parallel_backtest_task(task):
+    """Exécute une tâche avec les données initialisées dans le processus."""
+    context = _PARALLEL_BACKTEST_CONTEXT
+    if context is None:
+        raise RuntimeError('Le contexte parallèle du backtest n’est pas initialisé.')
+    return _execute_backtest_task(
+        context['screen'],
+        context['returns'],
+        task,
+        context['list_noire_path'],
+        context['backtest_options'],
+    )
+
+
+def _run_signal_backtest_tasks(screen, returns, tasks, list_noire_path,
+                               backtest_options, n_jobs):
+    """Exécute des signaux en ordre stable, séquentiellement ou par processus."""
+    if not tasks:
+        return []
+    resolved_n_jobs = _resolve_n_jobs(n_jobs, len(tasks))
+    if resolved_n_jobs == 1:
+        return [
+            _execute_backtest_task(
+                screen, returns, task, list_noire_path, backtest_options,
+            )
+            for task in tasks
+        ]
+    if backtest_options.get('retain_builders'):
+        raise ValueError(
+            'retain_builders=True n’est pas compatible avec n_jobs > 1. '
+            'Utilisez n_jobs=1 pour ce diagnostic.'
+        )
+    if backtest_options.get('save_path') is not None:
+        raise ValueError(
+            'save_path n’est pas compatible avec plusieurs signaux parallèles. '
+            'Exportez les résultats après le calcul ou utilisez n_jobs=1.'
+        )
+
+    execution_options = dict(backtest_options)
+    show_plot = bool(execution_options.get('show_plot', True))
+    execution_options['show_plot'] = False
+    execution_options['build_figure'] = bool(
+        execution_options.get('build_figure', True) or show_plot
+    )
+    monthly_base_cache = execution_options.get('monthly_base_cache')
+    _bind_monthly_base_cache(screen, monthly_base_cache)
+    cache_is_ready = (
+        monthly_base_cache is None
+        or any(key != '_source_id' for key in monthly_base_cache)
+    )
+
+    completed_results = []
+    remaining_tasks = list(tasks)
+    if not cache_is_ready:
+        completed_results.append(
+            _execute_backtest_task(
+                screen,
+                returns,
+                remaining_tasks.pop(0),
+                list_noire_path,
+                execution_options,
+            )
+        )
+
+    if remaining_tasks:
+        worker_count = min(resolved_n_jobs, len(remaining_tasks))
+        print(
+            f'Exécution parallèle de {len(remaining_tasks)} signaux '
+            f'avec {worker_count} processus.'
+        )
+        with ProcessPoolExecutor(
+            max_workers=worker_count,
+            initializer=_initialize_parallel_backtest_worker,
+            initargs=(
+                screen,
+                returns,
+                list_noire_path,
+                execution_options,
+            ),
+        ) as executor:
+            completed_results.extend(
+                executor.map(_execute_parallel_backtest_task, remaining_tasks)
+            )
+        print('Exécution parallèle terminée.')
+
+    if show_plot:
+        for result in completed_results:
+            figure = result.get('figure')
+            if figure is not None:
+                figure.show()
+    return completed_results
+
+
 def test_unitary_signals(screen, returns, signal_config, list_noire_path,
                          dimensions=DEFAULT_SIGNAL_DIMENSIONS,
-                         **backtest_options):
+                         n_jobs=1, **backtest_options):
     """Teste séparément les dimensions et retourne un lot standardisé."""
+    _resolve_n_jobs(n_jobs, 1)
     backtest_options = _ensure_monthly_base_cache(backtest_options)
     if not isinstance(signal_config, dict):
         signal_config = {
@@ -747,6 +914,7 @@ def test_unitary_signals(screen, returns, signal_config, list_noire_path,
     dimension_options = {
         dimension: f'weight_{dimension}' for dimension in SIGNAL_DIMENSIONS
     }
+    tasks = []
 
     for variable, options in signal_config.items():
         working_screen, prepared_config = prepare_signals(
@@ -782,50 +950,63 @@ def test_unitary_signals(screen, returns, signal_config, list_noire_path,
             for dimension in SIGNAL_DIMENSIONS:
                 internal_options[f'weight_{dimension}'] = 0.0
             internal_options[weight_key] = 1.0
-            working_screen = calculate_composite_score(
-                working_screen,
-                metric,
-                {prepared_variable: internal_options},
-                signals_prepared=True,
-                precomputed_derivatives={
-                    prepared_variable: derived_dimensions,
-                },
-            )
             result_name = f'{variable} | {label}'
-            results[result_name] = run_top_worst_backtest(
-                working_screen, returns, metric, list_noire_path,
-                metadata={
+            tasks.append({
+                'name': result_name,
+                'metric': metric,
+                'score_specification': {
+                    'signal_config': {prepared_variable: internal_options},
+                    'signals_prepared': True,
+                    'precomputed_derivatives': {
+                        prepared_variable: derived_dimensions,
+                    },
+                },
+                'drop_metric': True,
+                'metadata': {
                     'test_type': 'unitary',
                     'test_name': f'{variable} | {label}',
                     'components': describe_signal_config(
                         {variable: unitary_options}, role='unitary',
                     ),
                 },
-                **backtest_options,
-            )
-            working_screen.drop(columns=[metric], inplace=True)
+            })
+
+    task_results = _run_signal_backtest_tasks(
+        working_screen,
+        returns,
+        tasks,
+        list_noire_path,
+        backtest_options,
+        n_jobs,
+    )
+    results.update({
+        task['name']: result
+        for task, result in zip(tasks, task_results)
+    })
     return {'screen': working_screen, 'results': results}
 
 
 def test_incremental_signals(screen, returns, baseline_config, candidate_config,
-                             list_noire_path, **backtest_options):
+                             list_noire_path, n_jobs=1, **backtest_options):
     """Compare une base et ses candidats dans un lot standardisé."""
+    _resolve_n_jobs(n_jobs, 1)
     backtest_options = _ensure_monthly_base_cache(backtest_options)
     baseline_config = _resolve_signal_config(screen, baseline_config)
     results = {}
+    tasks = []
     baseline_metric = 'Score_Baseline'
     working_screen = calculate_composite_score(
         screen, baseline_metric, baseline_config,
     )
-    results['Baseline'] = run_top_worst_backtest(
-        working_screen, returns, baseline_metric, list_noire_path,
-        metadata={
+    tasks.append({
+        'name': 'Baseline',
+        'metric': baseline_metric,
+        'metadata': {
             'test_type': 'incremental_baseline',
             'test_name': 'Baseline',
             'components': describe_signal_config(baseline_config, role='baseline'),
         },
-        **backtest_options,
-    )
+    })
 
     for variable, options in candidate_config.items():
         if variable in baseline_config:
@@ -842,9 +1023,10 @@ def test_incremental_signals(screen, returns, baseline_config, candidate_config,
         working_screen = calculate_composite_score(
             working_screen, metric, incremental_config,
         )
-        results[variable] = run_top_worst_backtest(
-            working_screen, returns, metric, list_noire_path,
-            metadata={
+        tasks.append({
+            'name': variable,
+            'metric': metric,
+            'metadata': {
                 'test_type': 'incremental_candidate',
                 'test_name': variable,
                 'components': (
@@ -852,39 +1034,64 @@ def test_incremental_signals(screen, returns, baseline_config, candidate_config,
                     + describe_signal_config(resolved_candidate, role='candidate')
                 ),
             },
-            **backtest_options,
-        )
+        })
+
+    task_results = _run_signal_backtest_tasks(
+        working_screen,
+        returns,
+        tasks,
+        list_noire_path,
+        backtest_options,
+        n_jobs,
+    )
+    results.update({
+        task['name']: result
+        for task, result in zip(tasks, task_results)
+    })
     return {'screen': working_screen, 'results': results}
 
 
 def test_composite_signal(screen, returns, score_col, signal_config,
-                          list_noire_path, test_name=None, **backtest_options):
+                          list_noire_path, test_name=None, n_jobs=1,
+                          **backtest_options):
     """Construit un seul composite et retourne un lot standardisé."""
+    _resolve_n_jobs(n_jobs, 1)
     backtest_options = _ensure_monthly_base_cache(backtest_options)
     signal_config = _resolve_signal_config(screen, signal_config)
     scored_screen = calculate_composite_score(screen, score_col, signal_config)
     result_name = test_name or score_col
-    backtest_result = run_top_worst_backtest(
-        scored_screen, returns, score_col, list_noire_path,
-        metadata={
+    task = {
+        'name': result_name,
+        'metric': score_col,
+        'metadata': {
             'test_type': 'composite',
             'test_name': result_name,
             'components': describe_signal_config(signal_config, role='composite'),
         },
-        **backtest_options,
-    )
+    }
+    backtest_result = _run_signal_backtest_tasks(
+        scored_screen,
+        returns,
+        [task],
+        list_noire_path,
+        backtest_options,
+        n_jobs,
+    )[0]
     return {'screen': scored_screen, 'results': {result_name: backtest_result}}
 
 
 def test_composite_signals(screen, returns, composite_configs, list_noire_path,
-                           score_prefix='Score_Composite', **backtest_options):
+                           score_prefix='Score_Composite', n_jobs=1,
+                           **backtest_options):
     """Construit et teste plusieurs recettes composites indépendantes."""
+    _resolve_n_jobs(n_jobs, 1)
     backtest_options = _ensure_monthly_base_cache(backtest_options)
     if not isinstance(composite_configs, dict) or not composite_configs:
         raise ValueError('Ajoutez au moins une configuration composite nommée.')
 
     working_screen = screen
     results = {}
+    tasks = []
     for index, (composite_name, signal_config) in enumerate(composite_configs.items(), start=1):
         if not isinstance(signal_config, dict) or not signal_config:
             raise ValueError(
@@ -892,17 +1099,34 @@ def test_composite_signals(screen, returns, composite_configs, list_noire_path,
             )
         score_col = f'{score_prefix}_{index}_{_safe_filename(composite_name)}'
         print(f'Test de score composite : {composite_name}')
-        batch = test_composite_signal(
-            screen=working_screen,
-            returns=returns,
-            score_col=score_col,
-            signal_config=signal_config,
-            list_noire_path=list_noire_path,
-            test_name=str(composite_name),
-            **backtest_options,
+        resolved_config = _resolve_signal_config(working_screen, signal_config)
+        working_screen = calculate_composite_score(
+            working_screen, score_col, resolved_config,
         )
-        working_screen = batch['screen']
-        results[composite_name] = batch['results'][str(composite_name)]
+        tasks.append({
+            'name': composite_name,
+            'metric': score_col,
+            'metadata': {
+                'test_type': 'composite',
+                'test_name': str(composite_name),
+                'components': describe_signal_config(
+                    resolved_config, role='composite',
+                ),
+            },
+        })
+
+    task_results = _run_signal_backtest_tasks(
+        working_screen,
+        returns,
+        tasks,
+        list_noire_path,
+        backtest_options,
+        n_jobs,
+    )
+    results.update({
+        task['name']: result
+        for task, result in zip(tasks, task_results)
+    })
 
     return {'screen': working_screen, 'results': results}
 

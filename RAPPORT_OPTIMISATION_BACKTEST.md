@@ -432,7 +432,57 @@ La mémoire suit la même tendance :
 
 Le profiling des dix variables et treize dimensions, présenté en section 10, utilise une fenêtre distincte de 130 072 lignes. Ses 41,40 s avant et 16,45 s après ne doivent donc pas être additionnées au total de 15,998 s ci-dessus : il s’agit d’une mesure ciblée destinée à isoler le coût de fabrication des colonnes dérivées.
 
-## 16. Limites et prochaines optimisations possibles
+## 16. Parallélisation des signaux indépendants
+
+Les fonctions `test_unitary_signals()`, `test_incremental_signals()` et `test_composite_signals()` acceptent désormais `n_jobs`. La valeur par défaut `n_jobs=1` conserve strictement l’exécution séquentielle historique. Une valeur supérieure à 1 distribue les backtests de signaux indépendants entre plusieurs processus.
+
+La parallélisation reste placée au niveau où les tâches sont réellement indépendantes :
+
+- les dérivées d’une variable sont toujours générées ensemble après un seul tri ;
+- Top et Worst restent dans la même tâche et partagent la préparation mensuelle ;
+- le parent calcule le benchmark une seule fois ;
+- le premier signal construit le cache mensuel lorsqu’il est vide ;
+- les workers reçoivent ensuite le screen compact, les rendements, le benchmark et une copie prête à lire du cache ;
+- les résultats sont réunis dans l’ordre d’origine, indépendamment de l’ordre réel de fin des processus ;
+- les figures Plotly sont renvoyées au processus principal et affichées dans cet ordre.
+
+Le changement principal peut être résumé ainsi :
+
+Avant :
+
+```python
+results = {}
+for variable in signal_config:
+    results[variable] = run_top_worst_backtest(...)
+```
+
+Après :
+
+```python
+with ProcessPoolExecutor(
+    max_workers=worker_count,
+    initializer=_initialize_parallel_backtest_worker,
+    initargs=(screen, returns, list_noire_path, execution_options),
+) as executor:
+    ordered_results = list(
+        executor.map(_execute_parallel_backtest_task, signal_tasks)
+    )
+```
+
+Le scénario réel de validation utilise quatre signaux `level` sur tout l’historique 2010-2026 : `Revenue 5Y CAGR`, `FCF Conversion`, `Gross Margin` et `Ebitda Margin`. Le benchmark, les points de rupture et toutes les options sont identiques entre les deux exécutions.
+
+| Lot de quatre signaux | Temps | Accélération | Gain temps |
+|---|---:|---:|---:|
+| `n_jobs=1` | 39,039 s | 1,00× | — |
+| `n_jobs=4` | 22,332 s | **1,75×** | **42,8 %** |
+
+Le premier signal reste séquentiel afin de préchauffer le cache mensuel ; les trois signaux suivants s’exécutent simultanément. La mesure parallèle inclut la création des processus Windows et la sérialisation des données compactes vers chaque worker.
+
+L’équivalence stricte est confirmée pour les performances, les positions Top et Worst, les ratios, les métriques classiques, les métriques par période et la Composition. La suite automatisée vérifie séparément les lots unitaires, incrémentaux et composites, ainsi que le maintien de l’ordre et le retour des figures Plotly. La validation a également été exécutée depuis un véritable kernel Jupyter sous Windows.
+
+La recommandation générale est de commencer avec `n_jobs=2` à `n_jobs=4`. Chaque processus possède ses propres tables de travail, même si les entrées ont été compactées. `retain_builders=True` et un `save_path` unique sont donc refusés lorsque `n_jobs > 1` ; les résultats doivent être exportés après la réunion du lot.
+
+## 17. Limites et prochaines optimisations possibles
 
 Le coût restant est principalement concentré dans le calcul quotidien répété pour chaque signal et dans certaines opérations pandas historiques encore basées sur `groupby.apply()` ou sur des boucles de dates.
 

@@ -89,6 +89,38 @@ def _frame_digest(frame):
     return hashlib.sha256(content).hexdigest()
 
 
+def _assert_batches_exactly_equal(test_case, sequential, parallel):
+    """Compare les sorties financières de deux lots dans leur ordre d'origine."""
+    test_case.assertEqual(
+        list(sequential['results']), list(parallel['results']),
+    )
+    frame_names = (
+        'performance', 'top_holdings', 'worst_holdings',
+        'ratios', 'period_metrics', 'composition',
+    )
+    scalar_names = (
+        'robust_score', 'top_bench_ratio', 'top_worst_ratio',
+        'active_max_drawdown', 'tracking_error_annualized',
+        'min_rolling_3y_cagr',
+    )
+    for result_name in sequential['results']:
+        expected = sequential['results'][result_name]
+        actual = parallel['results'][result_name]
+        for frame_name in frame_names:
+            pd.testing.assert_frame_equal(
+                expected[frame_name], actual[frame_name], check_exact=True,
+            )
+        pd.testing.assert_frame_equal(
+            pd.DataFrame(expected['classic_metrics']),
+            pd.DataFrame(actual['classic_metrics']),
+            check_exact=True,
+        )
+        for scalar_name in scalar_names:
+            np.testing.assert_equal(
+                expected[scalar_name], actual[scalar_name],
+            )
+
+
 class TestChargementDonnees(unittest.TestCase):
     """Vérifie la projection des colonnes et la fenêtre historique chargée."""
 
@@ -580,6 +612,135 @@ class TestOptimisationsMemoire(unittest.TestCase):
         pd.testing.assert_frame_equal(
             first['performance'], second['performance'], check_exact=True,
         )
+
+
+class TestParallelisationSignaux(unittest.TestCase):
+    """Vérifie l'équivalence stricte des lots séquentiels et parallèles."""
+
+    @staticmethod
+    def _inputs():
+        screen, returns, benchmark = _deterministic_backtest_data()
+        screen['Exchange Country Region'] = 'Europe'
+        screen['Signal 2'] = screen['Signal']
+        screen['Signal 3'] = screen['Signal']
+        benchmark_performance = func.calculate_benchmark_performance(
+            screen, returns, bench=benchmark, start_date='2024-01-01',
+        )
+        options = {
+            'bench': benchmark,
+            'bench_perf': benchmark_performance,
+            'start_date': '2024-01-01',
+            'period_breakpoints': [],
+            'show_plot': False,
+            'build_figure': False,
+        }
+        return screen, returns, options
+
+    def test_signaux_unitaires_paralleles_restent_exacts(self):
+        screen, returns, options = self._inputs()
+        config = {
+            variable: signal_options(level=1.0)
+            for variable in ('Signal', 'Signal 2', 'Signal 3')
+        }
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore')
+            sequential = func.test_unitary_signals(
+                screen.copy(), returns, config, None,
+                dimensions=('level',), n_jobs=1,
+                monthly_base_cache={}, **options,
+            )
+            parallel = func.test_unitary_signals(
+                screen.copy(), returns, config, None,
+                dimensions=('level',), n_jobs=2,
+                monthly_base_cache={}, **options,
+            )
+
+        _assert_batches_exactly_equal(self, sequential, parallel)
+        self.assertFalse(any(
+            str(column).startswith('Unitary_')
+            for column in parallel['screen'].columns
+        ))
+
+    def test_composites_paralleles_restent_exacts_et_ordonnes(self):
+        screen, returns, options = self._inputs()
+        options = {**options, 'build_figure': True}
+        composites = {
+            name: {variable: signal_options(level=1.0)}
+            for name, variable in (
+                ('Composite A', 'Signal'),
+                ('Composite B', 'Signal 2'),
+                ('Composite C', 'Signal 3'),
+            )
+        }
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore')
+            sequential = func.test_composite_signals(
+                screen.copy(), returns, composites, None,
+                n_jobs=1, monthly_base_cache={}, **options,
+            )
+            parallel = func.test_composite_signals(
+                screen.copy(), returns, composites, None,
+                n_jobs=2, monthly_base_cache={}, **options,
+            )
+
+        _assert_batches_exactly_equal(self, sequential, parallel)
+        self.assertEqual(
+            list(parallel['results']), list(composites),
+        )
+        self.assertTrue(all(
+            result['figure'] is not None
+            for result in parallel['results'].values()
+        ))
+
+    def test_candidats_incrementaux_paralleles_restent_exacts(self):
+        screen, returns, options = self._inputs()
+        baseline = {'Signal': signal_options(level=1.0)}
+        candidates = {
+            variable: signal_options(level=1.0)
+            for variable in ('Signal 2', 'Signal 3')
+        }
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore')
+            sequential = func.test_incremental_signals(
+                screen.copy(), returns, baseline, candidates, None,
+                n_jobs=1, monthly_base_cache={}, **options,
+            )
+            parallel = func.test_incremental_signals(
+                screen.copy(), returns, baseline, candidates, None,
+                n_jobs=2, monthly_base_cache={}, **options,
+            )
+
+        _assert_batches_exactly_equal(self, sequential, parallel)
+        self.assertEqual(
+            list(parallel['results']), ['Baseline', 'Signal 2', 'Signal 3'],
+        )
+
+    def test_n_jobs_invalide_est_refuse(self):
+        screen = _screen_minimal()
+        with self.assertRaisesRegex(ValueError, 'n_jobs'):
+            func.test_composite_signal(
+                screen, pd.DataFrame(), 'Score',
+                {'Revenue 5Y CAGR': signal_options(level=1.0)},
+                None, n_jobs=0,
+            )
+
+    def test_options_lourdes_sont_refusees_en_parallele(self):
+        config = {
+            variable: signal_options(level=1.0)
+            for variable in ('Revenue 5Y CAGR', 'Net Debt to Ebit')
+        }
+        for option, value in (
+            ('retain_builders', True),
+            ('save_path', Path('resultat_unique.html')),
+        ):
+            with self.subTest(option=option), self.assertRaisesRegex(
+                ValueError, option,
+            ):
+                func.test_unitary_signals(
+                    _screen_minimal(), pd.DataFrame(), config, None,
+                    dimensions=('level',), n_jobs=2,
+                    **{option: value},
+                )
 
 
 class TestReconstructionPeriodes(unittest.TestCase):
