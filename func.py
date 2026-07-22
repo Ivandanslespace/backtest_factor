@@ -1553,16 +1553,20 @@ def combine_backtest_performances(results=None, export_dir=None, selections=None
     return combined
 
 
-def _comparison_test_paths(sources, max_tests):
+def _comparison_test_paths(sources, max_tests, scores_by_path=None):
     """Retient les meilleurs tests pour garder la comparaison graphique lisible."""
     if max_tests is None:
         return list(sources)
     if not isinstance(max_tests, int) or max_tests < 1:
         raise ValueError('max_tests doit être un entier positif ou None.')
+    scores_by_path = scores_by_path or {}
 
     def sort_key(item):
         test_path, source = item
-        robust_score = pd.to_numeric(source.get('robust_score'), errors='coerce')
+        robust_score = pd.to_numeric(
+            scores_by_path.get(test_path, source.get('robust_score')),
+            errors='coerce',
+        )
         return (
             pd.isna(robust_score),
             -float(robust_score) if pd.notna(robust_score) else 0.0,
@@ -1574,20 +1578,98 @@ def _comparison_test_paths(sources, max_tests):
     ]
 
 
+def _comparison_scores_by_period(metrics, period_id):
+    """Associe chaque test à son Robust Score pour une période donnée."""
+    if not isinstance(metrics, pd.DataFrame) or metrics.empty:
+        return {}
+    required_columns = {'test_path', 'period_id', 'robust_score'}
+    if not required_columns.issubset(metrics.columns):
+        return {}
+    period_rows = metrics.loc[
+        metrics['period_id'].astype(str).eq(str(period_id)),
+        ['test_path', 'robust_score'],
+    ].drop_duplicates('test_path', keep='last')
+    return period_rows.set_index('test_path')['robust_score'].to_dict()
+
+
+def _comparison_metrics(results=None, export_dir=None):
+    """Recharge ou reconstruit la table unique des métriques de comparaison."""
+    if export_dir is not None:
+        metrics_path = Path(export_dir) / 'backtest_metrics.csv'
+        if metrics_path.exists():
+            return pd.read_csv(metrics_path)
+    if results is not None:
+        return _build_analysis_tables_from_results(results)['metrics_by_period']
+    return pd.DataFrame()
+
+
+def _comparison_period_definitions(metrics, period_breakpoints=None):
+    """Décrit la période totale et les sous-périodes disponibles dans les métriques."""
+    total_period = {
+        'id': 'total',
+        'label': 'Période totale',
+        'start': None,
+        'end': None,
+    }
+    required_columns = {
+        'period_id', 'period_label', 'actual_start_date', 'actual_end_date',
+    }
+    if isinstance(metrics, pd.DataFrame) and required_columns.issubset(metrics.columns):
+        period_rows = metrics.loc[
+            metrics['period_id'].notna(),
+            ['period_id', 'period_label', 'actual_start_date', 'actual_end_date'],
+        ].drop_duplicates('period_id', keep='last').copy()
+        if not period_rows.empty:
+            total_rows = period_rows.loc[
+                period_rows['period_id'].astype(str).eq('total')
+            ]
+            if not total_rows.empty:
+                total_label = total_rows.iloc[0]['period_label']
+                if pd.notna(total_label):
+                    total_period['label'] = str(total_label)
+            subperiod_rows = period_rows.loc[
+                ~period_rows['period_id'].astype(str).eq('total')
+            ].copy()
+            if not subperiod_rows.empty:
+                subperiod_rows['_start_sort'] = pd.to_datetime(
+                    subperiod_rows['actual_start_date'], errors='coerce',
+                )
+                subperiod_rows = subperiod_rows.sort_values(
+                    ['_start_sort', 'period_id'], na_position='last',
+                )
+                subperiods = []
+                for _, row in subperiod_rows.iterrows():
+                    subperiods.append({
+                        'id': str(row['period_id']),
+                        'label': str(row['period_label']),
+                        'start': row['actual_start_date'],
+                        'end': row['actual_end_date'],
+                    })
+                return [total_period, *subperiods]
+            return [total_period]
+    if period_breakpoints:
+        return [total_period, *build_periods_from_breakpoints(period_breakpoints)]
+    return [total_period]
+
+
 def build_performance_comparison_definitions(results=None, export_dir=None,
                                              max_tests=8,
-                                             include_worst_benchmark_ratio=False):
+                                             include_worst_benchmark_ratio=False,
+                                             period_id='total', metrics=None):
     """Crée une comparaison lisible des meilleurs tests disponibles.
 
-    Le score de robustesse de la période totale sélectionne au plus ``max_tests``
+    Le score de robustesse de ``period_id`` sélectionne au plus ``max_tests``
     tests. Passez ``None`` pour reproduire une comparaison exhaustive.
     """
     sources = _collect_performance_sources(results=results, export_dir=export_dir)
+    if metrics is None:
+        metrics = _comparison_metrics(results=results, export_dir=export_dir)
+    scores_by_path = _comparison_scores_by_period(metrics, period_id)
     selections = {}
     labels_by_test = {}
     benchmark_selection = None
 
-    for test_path in _comparison_test_paths(sources, max_tests):
+    for test_path in _comparison_test_paths(sources, max_tests, scores_by_path):
         source = sources[test_path]
         performance = source['performance']
         display_path = _performance_display_path(test_path, source)
@@ -1625,13 +1707,16 @@ def build_performance_comparison_definitions(results=None, export_dir=None,
 
 def prepare_performance_comparison(results=None, export_dir=None, save_path=None,
                                    max_tests=8,
-                                   include_worst_benchmark_ratio=False):
+                                   include_worst_benchmark_ratio=False,
+                                   period_id='total', metrics=None):
     """Prépare une comparaison graphique limitée aux tests les plus pertinents."""
     selections, ratio_definitions = build_performance_comparison_definitions(
         results=results,
         export_dir=export_dir,
         max_tests=max_tests,
         include_worst_benchmark_ratio=include_worst_benchmark_ratio,
+        period_id=period_id,
+        metrics=metrics,
     )
     performance, composition = combine_backtest_performances(
         results=results,
@@ -1652,6 +1737,29 @@ def prepare_performance_comparison(results=None, export_dir=None, save_path=None
         'performance_selection': selections,
         'ratio_definitions': ratio_definitions,
     }
+
+
+def prepare_performance_comparisons_by_period(results=None, export_dir=None,
+                                               max_tests=8,
+                                               include_worst_benchmark_ratio=False,
+                                               period_breakpoints=None):
+    """Prépare une comparaison indépendante pour la période totale et chaque segment."""
+    metrics = _comparison_metrics(results=results, export_dir=export_dir)
+    periods = _comparison_period_definitions(metrics, period_breakpoints)
+    comparisons = {}
+    for period in periods:
+        comparison = prepare_performance_comparison(
+            results=results,
+            export_dir=export_dir,
+            max_tests=max_tests,
+            include_worst_benchmark_ratio=include_worst_benchmark_ratio,
+            period_id=period['id'],
+            metrics=metrics,
+        )
+        comparison['period'] = period
+        comparison['period_definitions'] = periods
+        comparisons[period['id']] = comparison
+    return comparisons
 
 
 def calculate_performance_ratios(performance, benchmark_column='Benchmark',
@@ -2046,7 +2154,9 @@ def plot_performance_comparison(performance, ratios, benchmark_column='Benchmark
                                 title='Comparaison des performances',
                                 save_path=None, show_plot=True, rebase=True,
                                 period_breakpoints=None,
-                                show_worst_performance=False):
+                                show_worst_performance=False,
+                                period_definitions=None,
+                                default_period_id='total'):
     """Trace une comparaison compacte avec un sélecteur de périodes."""
     if benchmark_column not in performance.columns:
         raise KeyError(f'Benchmark « {benchmark_column} » absent des performances.')
@@ -2072,7 +2182,50 @@ def plot_performance_comparison(performance, ratios, benchmark_column='Benchmark
             window_ratios = _rebase_frame(window_ratios, base_value=1.0)
         return window_performance.loc[:, displayed_performance_columns], window_ratios
 
-    displayed_performance, displayed_ratios = displayed_frames()
+    if period_definitions is None:
+        periods = _comparison_period_definitions(
+            pd.DataFrame(), period_breakpoints,
+        )
+    else:
+        periods = []
+        known_period_ids = set()
+        for period in period_definitions:
+            period_id = str(period.get('id', 'total'))
+            if period_id in known_period_ids:
+                continue
+            known_period_ids.add(period_id)
+            start = period.get('start')
+            end = period.get('end')
+            periods.append({
+                'id': period_id,
+                'label': str(period.get('label', period_id)),
+                'start': None if pd.isna(start) else start,
+                'end': None if pd.isna(end) else end,
+            })
+        if 'total' not in known_period_ids:
+            periods.insert(0, {
+                'id': 'total',
+                'label': 'Période totale',
+                'start': None,
+                'end': None,
+            })
+
+    periods_by_id = {period['id']: period for period in periods}
+    if default_period_id not in periods_by_id:
+        raise KeyError(
+            f'Période par défaut inconnue : {default_period_id}. '
+            f"Périodes disponibles : {', '.join(periods_by_id)}"
+        )
+    default_period = periods_by_id[default_period_id]
+    displayed_performance, displayed_ratios = displayed_frames(
+        default_period['start'], default_period['end'],
+    )
+
+    def period_title(period):
+        """Construit le titre cohérent avec la période effectivement affichée."""
+        if period['id'] == 'total':
+            return title
+        return f"{title} | {period['label']}"
 
     fig = make_subplots(
         rows=2,
@@ -2096,8 +2249,8 @@ def plot_performance_comparison(performance, ratios, benchmark_column='Benchmark
     for column in displayed_performance.columns:
         fig.add_trace(
             go.Scatter(
-                x=performance.index,
-                y=performance[column],
+                x=displayed_performance.index,
+                y=displayed_performance[column],
                 mode='lines',
                 name=column,
                 legendgroup=column,
@@ -2120,8 +2273,8 @@ def plot_performance_comparison(performance, ratios, benchmark_column='Benchmark
         numerator = ratio_name.split(' / ', 1)[0]
         fig.add_trace(
             go.Scatter(
-                x=ratios.index,
-                y=ratios[column],
+                x=displayed_ratios.index,
+                y=displayed_ratios[column],
                 mode='lines',
                 name=ratio_name,
                 legendgroup=ratio_name,
@@ -2150,9 +2303,9 @@ def plot_performance_comparison(performance, ratios, benchmark_column='Benchmark
         col=1,
     )
     fig.update_layout(
-        title=title,
+        title=period_title(default_period),
         width=1400,
-        height=800,
+        height=1050,
         template='plotly_white',
         hovermode='x unified',
         legend=dict(
@@ -2168,41 +2321,16 @@ def plot_performance_comparison(performance, ratios, benchmark_column='Benchmark
             orientation='v',
             x=1.01,
             xanchor='left',
-            y=0.47,
+            y=0.34,
             yanchor='top',
             title=dict(text='Ratios', font=dict(size=10)),
             font=dict(size=9),
         ),
-        margin=dict(r=420, t=100),
+        margin=dict(r=460, t=100),
     )
-    periods = build_periods_from_breakpoints(period_breakpoints) if period_breakpoints else []
-    if periods:
-        default_x = [
-            displayed_performance.index.tolist()
-            for _ in displayed_performance.columns
-        ] + [
-            displayed_ratios.index.tolist()
-            for _ in displayed_ratios.columns
-        ]
-        default_y = [
-            displayed_performance[column].tolist()
-            for column in displayed_performance.columns
-        ] + [
-            displayed_ratios[column].tolist()
-            for column in displayed_ratios.columns
-        ]
-        period_buttons = [{
-            'label': 'Période totale',
-            'method': 'update',
-            'args': [
-                {'x': default_x, 'y': default_y},
-                {
-                    'xaxis.autorange': True,
-                    'xaxis2.autorange': True,
-                    'title.text': title,
-                },
-            ],
-        }]
+    if len(periods) > 1:
+        period_buttons = []
+        active_period_index = 0
         for period in periods:
             period_performance, period_ratios = displayed_frames(
                 period.get('start'), period.get('end'),
@@ -2231,14 +2359,17 @@ def plot_performance_comparison(performance, ratios, benchmark_column='Benchmark
                     {
                         'xaxis.autorange': True,
                         'xaxis2.autorange': True,
-                        'title.text': f"{title} | {period['label']}",
+                        'title.text': period_title(period),
                     },
                 ],
             })
+            if period['id'] == default_period_id:
+                active_period_index = len(period_buttons) - 1
         if len(period_buttons) > 1:
             fig.update_layout(
                 updatemenus=[{
                     'buttons': period_buttons,
+                    'active': active_period_index,
                     'direction': 'down',
                     'showactive': True,
                     'x': 0,
@@ -2258,7 +2389,7 @@ def plot_performance_comparison(performance, ratios, benchmark_column='Benchmark
                         'xanchor': 'left',
                     },
                 ],
-                margin=dict(r=420, t=145),
+                margin=dict(r=460, t=145),
             )
     if save_path is not None:
         save_path = Path(save_path)

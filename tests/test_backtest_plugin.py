@@ -1052,6 +1052,72 @@ class TestComparaisonPerformance(unittest.TestCase):
         self.assertEqual(len(comparison['ratios'].columns), 4)
         self.assertEqual(len(figure.data), 7)
 
+    def test_chaque_periode_selectionne_ses_propres_meilleurs_tests(self):
+        results = {
+            'unitary': {
+                'screen': pd.DataFrame(),
+                'results': {
+                    f'Signal {score}': self._resultat_comparaison(score)
+                    for score in (0.1, 0.9)
+                },
+            },
+        }
+        metrics = pd.DataFrame([
+            {
+                'test_path': 'unitary / Signal 0.1',
+                'period_id': 'total',
+                'period_label': 'Période totale',
+                'actual_start_date': None,
+                'actual_end_date': None,
+                'robust_score': 0.1,
+            },
+            {
+                'test_path': 'unitary / Signal 0.9',
+                'period_id': 'total',
+                'period_label': 'Période totale',
+                'actual_start_date': None,
+                'actual_end_date': None,
+                'robust_score': 0.9,
+            },
+            {
+                'test_path': 'unitary / Signal 0.1',
+                'period_id': 'since_2024',
+                'period_label': 'Depuis 2024',
+                'actual_start_date': '2024-01-01',
+                'actual_end_date': None,
+                'robust_score': 0.8,
+            },
+            {
+                'test_path': 'unitary / Signal 0.9',
+                'period_id': 'since_2024',
+                'period_label': 'Depuis 2024',
+                'actual_start_date': '2024-01-01',
+                'actual_end_date': None,
+                'robust_score': 0.2,
+            },
+        ])
+
+        with patch.object(func, '_comparison_metrics', return_value=metrics):
+            comparisons = func.prepare_performance_comparisons_by_period(
+                results=results, max_tests=1,
+            )
+
+        total_paths = {
+            test_path for test_path, _ in comparisons['total'][
+                'performance_selection'
+            ].values()
+        }
+        recent_paths = {
+            test_path for test_path, _ in comparisons['since_2024'][
+                'performance_selection'
+            ].values()
+        }
+        self.assertSetEqual(total_paths, {'unitary / Signal 0.9'})
+        self.assertSetEqual(recent_paths, {'unitary / Signal 0.1'})
+        self.assertEqual(
+            comparisons['since_2024']['period']['label'], 'Depuis 2024',
+        )
+
     def test_menu_de_periodes_rebase_performances_et_ratios(self):
         dates = pd.to_datetime(['2019-12-31', '2020-01-02', '2020-01-03'])
         performance = pd.DataFrame({
@@ -1097,6 +1163,47 @@ class TestComparaisonPerformance(unittest.TestCase):
             show_worst_performance=True,
         )
         self.assertEqual(len(figure_with_worst.data), 5)
+
+    def test_periode_par_defaut_est_visible_des_l_ouverture(self):
+        dates = pd.to_datetime(['2019-12-31', '2020-01-02', '2020-01-03'])
+        performance = pd.DataFrame({
+            'Top': [100.0, 110.0, 121.0],
+            'Benchmark': [100.0, 105.0, 110.0],
+        }, index=dates)
+        ratios = pd.DataFrame({
+            'Top / Benchmark': performance['Top'] / performance['Benchmark'],
+        }, index=dates)
+
+        figure = func.plot_performance_comparison(
+            performance,
+            ratios,
+            benchmark_column='Benchmark',
+            period_definitions=[
+                {
+                    'id': 'total',
+                    'label': 'Période totale',
+                    'start': None,
+                    'end': None,
+                },
+                {
+                    'id': 'since_2020',
+                    'label': 'Depuis 2020',
+                    'start': '2020-01-01',
+                    'end': None,
+                },
+            ],
+            default_period_id='since_2020',
+            show_plot=False,
+        )
+
+        self.assertEqual(figure.data[0].x[0], pd.Timestamp('2020-01-02'))
+        self.assertEqual(figure.data[0].y[0], 100.0)
+        self.assertEqual(figure.data[2].y[0], 1.0)
+        self.assertEqual(
+            figure.layout.title.text,
+            'Comparaison des performances | Depuis 2020',
+        )
+        self.assertEqual(figure.layout.updatemenus[0].active, 1)
 
 
 class TestEquivalenceMoteur(unittest.TestCase):
