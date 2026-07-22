@@ -979,6 +979,42 @@ class TestReconstructionPeriodes(unittest.TestCase):
         ])
 
 
+class TestComparaisonPerformance(unittest.TestCase):
+    """Vérifie le menu de périodes et le rebasage local de la comparaison."""
+
+    def test_menu_de_periodes_rebase_performances_et_ratios(self):
+        dates = pd.to_datetime(['2019-12-31', '2020-01-02', '2020-01-03'])
+        performance = pd.DataFrame({
+            'Top': [100.0, 110.0, 121.0],
+            'Worst': [100.0, 90.0, 95.0],
+            'Benchmark': [100.0, 105.0, 110.0],
+        }, index=dates)
+        ratios = pd.DataFrame({
+            'Top / Benchmark': performance['Top'] / performance['Benchmark'],
+            'Top / Worst': performance['Top'] / performance['Worst'],
+        }, index=dates)
+
+        figure = func.plot_performance_comparison(
+            performance,
+            ratios,
+            benchmark_column='Benchmark',
+            period_breakpoints=[2020],
+            show_plot=False,
+        )
+
+        buttons = {
+            button.label: button
+            for button in figure.layout.updatemenus[0].buttons
+        }
+        since_2020 = buttons['Depuis 2020'].args[0]
+        self.assertEqual(since_2020['x'][0][0], pd.Timestamp('2020-01-02'))
+        self.assertEqual(since_2020['y'][0][0], 100.0)
+        self.assertEqual(since_2020['y'][1][0], 100.0)
+        self.assertEqual(since_2020['y'][2][0], 100.0)
+        self.assertEqual(since_2020['y'][3][0], 1.0)
+        self.assertEqual(since_2020['y'][4][0], 1.0)
+
+
 class TestEquivalenceMoteur(unittest.TestCase):
     """Fige les positions, performances et métriques du moteur de référence."""
 

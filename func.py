@@ -2006,13 +2006,24 @@ def _rebase_frame(frame, base_value):
 
 def plot_performance_comparison(performance, ratios, benchmark_column='Benchmark',
                                 title='Comparaison des performances',
-                                save_path=None, show_plot=True, rebase=True):
-    """Trace en Plotly des performances et ratios déjà calculés."""
+                                save_path=None, show_plot=True, rebase=True,
+                                period_breakpoints=None):
+    """Trace les performances avec un sélecteur de périodes et un rebasage local."""
     if benchmark_column not in performance.columns:
         raise KeyError(f'Benchmark « {benchmark_column} » absent des performances.')
-    if rebase:
-        performance = _rebase_frame(performance, base_value=100.0)
-        ratios = _rebase_frame(ratios, base_value=1.0)
+    performance = performance.sort_index()
+    ratios = ratios.sort_index()
+
+    def displayed_frames(start=None, end=None):
+        """Prépare une fenêtre en ramenant chaque série à sa base locale."""
+        window_performance = performance.loc[start:end]
+        window_ratios = ratios.loc[start:end]
+        if rebase:
+            window_performance = _rebase_frame(window_performance, base_value=100.0)
+            window_ratios = _rebase_frame(window_ratios, base_value=1.0)
+        return window_performance, window_ratios
+
+    displayed_performance, displayed_ratios = displayed_frames()
 
     fig = make_subplots(
         rows=2,
@@ -2102,6 +2113,91 @@ def plot_performance_comparison(performance, ratios, benchmark_column='Benchmark
         ),
         margin=dict(r=420, t=100),
     )
+    periods = build_periods_from_breakpoints(period_breakpoints) if period_breakpoints else []
+    if periods:
+        default_x = [
+            displayed_performance.index.tolist()
+            for _ in displayed_performance.columns
+        ] + [
+            displayed_ratios.index.tolist()
+            for _ in displayed_ratios.columns
+        ]
+        default_y = [
+            displayed_performance[column].tolist()
+            for column in displayed_performance.columns
+        ] + [
+            displayed_ratios[column].tolist()
+            for column in displayed_ratios.columns
+        ]
+        period_buttons = [{
+            'label': 'Période totale',
+            'method': 'update',
+            'args': [
+                {'x': default_x, 'y': default_y},
+                {
+                    'xaxis.autorange': True,
+                    'xaxis2.autorange': True,
+                    'title.text': title,
+                },
+            ],
+        }]
+        for period in periods:
+            period_performance, period_ratios = displayed_frames(
+                period.get('start'), period.get('end'),
+            )
+            if period_performance.dropna(how='all').empty:
+                continue
+            period_x = [
+                period_performance.index.tolist()
+                for _ in period_performance.columns
+            ] + [
+                period_ratios.index.tolist()
+                for _ in period_ratios.columns
+            ]
+            period_y = [
+                period_performance[column].tolist()
+                for column in period_performance.columns
+            ] + [
+                period_ratios[column].tolist()
+                for column in period_ratios.columns
+            ]
+            period_buttons.append({
+                'label': period['label'],
+                'method': 'update',
+                'args': [
+                    {'x': period_x, 'y': period_y},
+                    {
+                        'xaxis.autorange': True,
+                        'xaxis2.autorange': True,
+                        'title.text': f"{title} | {period['label']}",
+                    },
+                ],
+            })
+        if len(period_buttons) > 1:
+            fig.update_layout(
+                updatemenus=[{
+                    'buttons': period_buttons,
+                    'direction': 'down',
+                    'showactive': True,
+                    'x': 0,
+                    'xanchor': 'left',
+                    'y': 1.16,
+                    'yanchor': 'top',
+                }],
+                annotations=[
+                    *list(fig.layout.annotations),
+                    {
+                        'text': 'Période :',
+                        'showarrow': False,
+                        'x': 0,
+                        'xref': 'paper',
+                        'y': 1.18,
+                        'yref': 'paper',
+                        'xanchor': 'left',
+                    },
+                ],
+                margin=dict(r=420, t=145),
+            )
     if save_path is not None:
         save_path = Path(save_path)
         save_path.parent.mkdir(parents=True, exist_ok=True)
