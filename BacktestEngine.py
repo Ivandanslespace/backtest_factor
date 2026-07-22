@@ -11,6 +11,7 @@ from dateutil.relativedelta import relativedelta
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import re
+import warnings
 from typing import Optional, Tuple
 from pathlib import Path
 
@@ -1460,11 +1461,45 @@ class PtfBuilder:
         )
         top_results = []
         bottom_results = []
+        weight_column = 'Weight in ' + self.bench
         from tqdm import tqdm
         for date_ in tqdm(
             sorted(dates_to_keep), desc="Generation Sec_list Top/Worst",
         ):
             monthly_screen = screen_agg.loc[screen_agg['Date'] == date_]
+            positive_weights = pd.to_numeric(
+                monthly_screen[weight_column], errors='coerce',
+            ).gt(0)
+            if not positive_weights.any():
+                target_date = pd.Timestamp(date_) + pd.offsets.MonthBegin(1)
+                if not top_results:
+                    warnings.warn(
+                        f"Aucune pondération positive n'est disponible pour le "
+                        f"benchmark {self.bench} au {pd.Timestamp(date_):%Y-%m-%d}. "
+                        "Le rééquilibrage est ignoré, car aucune position "
+                        "précédente ne peut être prolongée.",
+                        RuntimeWarning,
+                        stacklevel=2,
+                    )
+                    continue
+                warnings.warn(
+                    f"Aucune pondération positive n'est disponible pour le "
+                    f"benchmark {self.bench} au {pd.Timestamp(date_):%Y-%m-%d}. "
+                    f"Le rééquilibrage prévu au {target_date:%Y-%m-%d} est "
+                    "ignoré et les positions précédentes sont prolongées par "
+                    "dérive.",
+                    RuntimeWarning,
+                    stacklevel=2,
+                )
+                top_results.append(
+                    self._drift_selection_to_date(top_results[-1], target_date)
+                )
+                bottom_results.append(
+                    builder_bottom._drift_selection_to_date(
+                        bottom_results[-1], target_date,
+                    )
+                )
+                continue
             top_results.append(
                 self.sec_list_spot(screen_agg_monthly=monthly_screen)
             )
@@ -1473,6 +1508,12 @@ class PtfBuilder:
                     self._last_monthly_preparation,
                 )
             )
+
+        if not top_results:
+            empty = pd.DataFrame()
+            self.sec_list_historical = empty.copy()
+            builder_bottom.sec_list_historical = empty.copy()
+            return empty, empty
 
         top_history = pd.concat(top_results, ignore_index=True)
         bottom_history = pd.concat(bottom_results, ignore_index=True)
@@ -1503,6 +1544,42 @@ class PtfBuilder:
             "l'attribut 'sec_list_historical' de chaque builder."
         )
         return top_history, bottom_history
+
+    def _drift_selection_to_date(self, selection, target_date):
+        """Prolonge une sélection existante jusqu'à une date sans rééquilibrage."""
+        if 'ISIN' in self.screen.columns:
+            references = (
+                self.screen.loc[:, ['ISIN', 'Company SEDOL']]
+                .dropna(subset=['ISIN', 'Company SEDOL'])
+                .drop_duplicates(subset='ISIN', keep='last')
+                .set_index('ISIN')['Company SEDOL']
+            )
+        else:
+            references = self.screen['Company SEDOL']
+            references = references.loc[
+                ~references.index.duplicated(keep='last')
+            ]
+
+        selection_to_drift = selection.copy()
+        selection_to_drift.loc[:, 'SEDOL'] = selection_to_drift['ISIN'].map(
+            references,
+        )
+        if not selection_to_drift['SEDOL'].isin(self.returns.columns).any():
+            raise ValueError(
+                "Aucun rendement n'est disponible pour prolonger les positions "
+                f"jusqu'au {pd.Timestamp(target_date):%Y-%m-%d}."
+            )
+
+        drifted = self.drift_weight(
+            selection_to_drift,
+            'SEDOL',
+            self.returns.copy(),
+            'Date',
+            'Weight',
+            pd.Timestamp(target_date),
+        )
+        drifted.loc[:, 'Date'] = pd.Timestamp(target_date)
+        return drifted.drop(columns='SEDOL', errors='ignore')
     
 
     def backtest_calcul_all_portfolio(self,df_rebal, df_returns, col_weight,col_sector = ' Benchmark ICB Supersector ', col_date='Date', col_id = 'Company SEDOL'):

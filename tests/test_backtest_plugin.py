@@ -563,6 +563,52 @@ class TestOptimisationsMemoire(unittest.TestCase):
         self.assertFalse(top.sec_list_historical.empty)
         self.assertFalse(worst.sec_list_historical.empty)
 
+    def test_mois_sans_poids_prolonge_les_positions_par_derive(self):
+        screen, returns, benchmark = _deterministic_backtest_data()
+        weight_column = f'Weight in {benchmark}'
+        missing_date = pd.Timestamp('2024-02-29')
+        screen.loc[screen['Date'].eq(missing_date), weight_column] = np.nan
+        top = PtfBuilder(
+            screen=screen, returns=returns, bench=benchmark,
+            percentile=0.13, metrics='Signal', liste_noire=None, Top=True,
+            esg_exclusion=0,
+        )
+        worst = PtfBuilder(
+            screen=screen, returns=returns, bench=benchmark,
+            percentile=0.13, metrics='Signal', liste_noire=None, Top=False,
+            esg_exclusion=0,
+        )
+
+        with (
+            warnings.catch_warnings(record=True) as captured,
+            patch('tqdm.tqdm', new=lambda values, **kwargs: values),
+        ):
+            warnings.simplefilter('always')
+            top.generic_histo_seclists_pair(
+                worst, start_date=pd.Timestamp('2024-01-01'),
+                freq_rebal=1, fill_method='drift',
+            )
+
+        warning_messages = [str(item.message) for item in captured]
+        self.assertTrue(any(
+            '2024-02-29' in message
+            and 'positions précédentes sont prolongées par dérive' in message
+            for message in warning_messages
+        ))
+        previous_date = pd.Timestamp('2024-02-01')
+        carried_date = pd.Timestamp('2024-03-01')
+        for builder in (top, worst):
+            previous = builder.sec_list_historical.loc[
+                builder.sec_list_historical['Date'].eq(previous_date)
+            ]
+            carried = builder.sec_list_historical.loc[
+                builder.sec_list_historical['Date'].eq(carried_date)
+            ]
+            self.assertFalse(previous.empty)
+            self.assertFalse(carried.empty)
+            self.assertSetEqual(set(previous['ISIN']), set(carried['ISIN']))
+            self.assertAlmostEqual(carried['Weight'].sum(), 1.0, places=12)
+
     def test_deux_signaux_reutilisent_la_meme_base_mensuelle(self):
         screen, returns, benchmark = _deterministic_backtest_data()
         screen['Signal 2'] = screen['Signal']
