@@ -1489,13 +1489,23 @@ class PtfBuilder:
     
         new_df = pd.DataFrame(data=nouvelle_liste_dates, columns=['Date_returns']) #INSTANCIATION dataframe AVEC COLONNE DE DATE DAILY
         
-        #ON MET DS LE DF DAILY LES DATES DE REBAL POUR ENSUITE PRENDRE LES POIDS REBAL SANS LES FAIRE DRIFTER. A chaque date du mois on a la derniere date de rebal
+        # Association de chaque date quotidienne à la dernière date de rebalancement.
         """
-        This code does the following:
-        For each date in the "Date_returns" column of the new_df dataframe, it searches in the df_rebal dataframe for all dates in the 
-        col_date column that are less than or equal to the given date. 
-        Then, it selects the maximum of these dates, representing the most recent REBALACING date before or on that date. 
-        This value is then assigned to the "Date_screen" column in new_df.
+        Exemple de transformation vectorisée :
+
+        rebalance_dates = [2021-01-04, 2021-02-01]
+
+        Date_returns  position trouvée  Date_screen
+        2021-01-03           -1          NaT
+        2021-01-04            0          2021-01-04
+        2021-01-05            0          2021-01-04
+        2021-01-29            0          2021-01-04
+        2021-02-01            1          2021-02-01
+        2021-02-02            1          2021-02-01
+
+        searchsorted(..., side='right') - 1 renvoie directement la position
+        de la dernière date de rebalancement inférieure ou égale à la date
+        quotidienne. Une position négative reste NaT et ne crée aucun faux match.
         """
         rebalance_dates = pd.DatetimeIndex(
             sorted(pd.to_datetime(df_rebal[col_date].dropna().unique()))
@@ -1522,7 +1532,7 @@ class PtfBuilder:
         df_returns = df_returns[new_df['Date_screen'].min():] # ON garde LES RETURN A PARTIR DE LA PREMIERE DATE des returns
         returns_cum = (1+df_returns).cumprod() # On a le ttr calculé pour à partir de la 1ère date de rebalancement
         
-        #ON REBASE LES DRIFT CUMULE à 1 à chaque date de rebal
+        # Rebasage matriciel des rendements cumulés à chaque rebalancement.
         cumulative_dates = pd.DatetimeIndex(returns_cum.index)
         cumulative_rebalance_positions = rebalance_dates.searchsorted(
             cumulative_dates, side='right',
@@ -1540,15 +1550,57 @@ class PtfBuilder:
             columns=returns_cum.columns,
         )
         """
-        Date	Asset_A (drift_multiplicator)	Asset_B (drift_multiplicator)
-        2021-01-01	1.00	1.00
-        2021-01-02	1.10	0.95
-        2021-01-03	1.15	1.05
-        XXXXXXXXXX
-        2021-02-01  1.00    1.00
+        Matrice returns_cum avant rebasage :
+
+        Date        Asset_A  Asset_B  Date de référence
+        2021-01-04     1.00     1.00  2021-01-04
+        2021-01-05     1.10     0.95  2021-01-04
+        2021-02-01     1.20     1.05  2021-02-01
+        2021-02-02     1.26     1.03  2021-02-01
+
+        Chaque ligne est divisée par la ligne de sa date de référence :
+
+        Date        Asset_A  Asset_B  = returns_drift
+        2021-01-04     1.00     1.00  = ligne 1 / ligne 1
+        2021-01-05     1.10     0.95  = ligne 2 / ligne 1
+        2021-02-01     1.00     1.00  = ligne 3 / ligne 3
+        2021-02-02     1.05     0.98  = ligne 4 / ligne 3
+
+        La division NumPy traite toute la matrice en une seule opération.
         """
 
         # Lecture directe des deux matrices sans les convertir en tables longues.
+        """
+        df_merge avant enrichissement :
+
+        Date        SEDOL    Portfolio weight
+        2021-01-05  Asset_A              0.60
+        2021-01-05  Asset_B              0.40
+        2021-02-02  Asset_A              0.55
+
+        Les indexeurs convertissent chaque clé en coordonnées matricielles :
+
+        Date        SEDOL    position_date  position_titre
+        2021-01-05  Asset_A        1               0
+        2021-01-05  Asset_B        1               1
+        2021-02-02  Asset_A        3               0
+
+        Lecture directe :
+
+        drift_matrix[1, 0]  -> 1.10     return_matrix[1, 0] ->  0.10
+        drift_matrix[1, 1]  -> 0.95     return_matrix[1, 1] -> -0.05
+        drift_matrix[3, 0]  -> 1.05     return_matrix[3, 0] ->  0.05
+
+        df_merge après enrichissement :
+
+        Date        SEDOL    Portfolio weight  drift_multiplicator  Return
+        2021-01-05  Asset_A              0.60                  1.10    0.10
+        2021-01-05  Asset_B              0.40                  0.95   -0.05
+        2021-02-02  Asset_A              0.55                  1.05    0.05
+
+        Aucune table longue issue de stack() et aucune fusion supplémentaire
+        ne sont nécessaires.
+        """
         date_positions = returns_drift.index.get_indexer(
             pd.DatetimeIndex(df_merge[col_date]),
         )
