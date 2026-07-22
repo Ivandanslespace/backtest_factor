@@ -271,12 +271,12 @@ class PtfBuilder:
         if type(screen) not in [str,type(pd.DataFrame())]:
             print("screen must be string or DataFrame")
         else:
-            self.screen=copy.deepcopy(screen)
+            self.screen=screen
 
         if type(returns) !=type(pd.DataFrame()):
             print("returns must be DataFrame")
         else:
-            self.returns=copy.deepcopy(returns)
+            self.returns=returns
 
         if type(reco_secto) not in [str, list, type(pd.DataFrame())]:
             print("reco_secto must be list or DataFrame")
@@ -500,18 +500,30 @@ class PtfBuilder:
         Neutraliser sectoriellement le score pour piocher les tops par secteur par la suite
         """
         df = df.copy()
-        df[list_score_col] = df[list_score_col].astype(float)
-        df.loc[:, list_score_col] = df[list_score_col].rank(pct=True)
-        df.loc[:, list_score_col] = (df[list_score_col] - df[list_score_col].min())/(df[list_score_col].max() - df[list_score_col].min()) # min max scaler
+        scores = df[list_score_col].astype(float).rank(pct=True)
+        scores = (scores - scores.min()) / (scores.max() - scores.min())
 
-        if self.score_neutral == "ICB 11":
-            for secto in df[' Benchmark ICB Industry '].unique():
-                df.loc[df[' Benchmark ICB Industry '] == secto, list_score_col] = df.loc[df[' Benchmark ICB Industry '] == secto, list_score_col].rank(pct=True)
-                df.loc[df[' Benchmark ICB Industry '] == secto, list_score_col] = (df.loc[df[' Benchmark ICB Industry '] == secto, list_score_col] - df.loc[df[' Benchmark ICB Industry '] == secto, list_score_col].min())/(df.loc[df[' Benchmark ICB Industry '] == secto, list_score_col].max() - df.loc[df[' Benchmark ICB Industry '] == secto, list_score_col].min())
-        elif self.score_neutral == "ICB 19":
-            for secto in df[' Benchmark ICB Supersector '].unique():
-                df.loc[df[' Benchmark ICB Supersector '] == secto, list_score_col] = df.loc[df[' Benchmark ICB Supersector '] == secto, list_score_col].rank(pct=True)
-                df.loc[df[' Benchmark ICB Supersector '] == secto, list_score_col] = (df.loc[df[' Benchmark ICB Supersector '] == secto, list_score_col] - df.loc[df[' Benchmark ICB Supersector '] == secto, list_score_col].min())/(df.loc[df[' Benchmark ICB Supersector '] == secto, list_score_col].max() - df.loc[df[' Benchmark ICB Supersector '] == secto, list_score_col].min())
+        sector_column = {
+            "ICB 11": ' Benchmark ICB Industry ',
+            "ICB 19": ' Benchmark ICB Supersector ',
+        }.get(self.score_neutral)
+        if sector_column is not None:
+            sector_keys = df[sector_column]
+            valid_sectors = sector_keys.notna()
+            sector_scores = scores.loc[valid_sectors].groupby(
+                sector_keys.loc[valid_sectors],
+            ).rank(pct=True)
+            sector_min = sector_scores.groupby(
+                sector_keys.loc[valid_sectors],
+            ).transform('min')
+            sector_max = sector_scores.groupby(
+                sector_keys.loc[valid_sectors],
+            ).transform('max')
+            scores.loc[valid_sectors] = (
+                sector_scores - sector_min
+            ) / (sector_max - sector_min)
+
+        df.loc[:, list_score_col] = scores
         return df
 
 
@@ -846,6 +858,24 @@ class PtfBuilder:
         
         # Appilquer les reco sectorielle aux secteurs
         weight_secto_bench = self.adjust_bench_weight_with_recommandation(df, reco_secto, date)
+
+        preparation = {
+            'df': df,
+            'date': date,
+            'list_score_col': list_score_col,
+            'nb_securities': nb_securities,
+            'weight_secto_bench': weight_secto_bench,
+        }
+        self._last_monthly_preparation = preparation
+        return self._finalize_sec_list_spot(preparation)
+
+    def _finalize_sec_list_spot(self, preparation):
+        """Construit une sélection Top ou Worst depuis une préparation commune."""
+        df = preparation['df'].copy(deep=True)
+        date = preparation['date']
+        list_score_col = preparation['list_score_col']
+        nb_securities = preparation['nb_securities']
+        weight_secto_bench = preparation['weight_secto_bench']
 
         # Filtrage ESG only if we choose Top ptf
         if self.Top:
@@ -1210,7 +1240,7 @@ class PtfBuilder:
         Raises:
         - ValueError: If start_date is not a datetime object or if no valid dates are found.
         """
-        screen_agg = copy.deepcopy(self.screen)
+        screen_agg = self.screen
         
         # Calculer les différences absolues entre chaque date et la start_date
         screen_agg = screen_agg[screen_agg["Date"]>=start_date]
@@ -1254,7 +1284,7 @@ class PtfBuilder:
             Combined results from the function applied to each subset
         """
         
-        screen_agg = copy.deepcopy(self.screen)
+        screen_agg = self.screen
         if type(screen_agg) == str:
             screen_agg = pd.read_parquet(screen_agg)
         
@@ -1270,7 +1300,9 @@ class PtfBuilder:
         print( "Premiere date du screen_agg prise en compte : " , self.start_date)
 
         # Filter by start_date
-        screen_agg = screen_agg[screen_agg['Date'] >= self.start_date]
+        screen_agg = screen_agg.loc[
+            screen_agg['Date'] >= self.start_date
+        ].copy()
         all_dates = sorted(screen_agg['Date'].unique())
         
         if not all_dates:
@@ -1288,15 +1320,13 @@ class PtfBuilder:
         dates_to_keep = sorted(dates_to_keep)
     
         # Create subsets for each date
-        screen_list = [screen_agg.loc[screen_agg['Date'] == date_] for date_ in dates_to_keep]
-        
-        
         # Apply function - handle possible parallelization issues
         func=self.sec_list_spot
 
         result_sec_list=[]
         from tqdm import tqdm
-        for screen in tqdm(screen_list, desc="Generation Sec_list"):
+        for date_ in tqdm(dates_to_keep, desc="Generation Sec_list"):
+            screen = screen_agg.loc[screen_agg['Date'] == date_]
             result_sec_list.append(func(screen_agg_monthly=screen))
             
         # Concatenate seclist results
@@ -1316,6 +1346,85 @@ class PtfBuilder:
         print(f"Historical sec list is generated, you can check 'self.sec_list_historical' attribute for more details.")
         
         return df
+
+    def generic_histo_seclists_pair(
+        self, builder_bottom, start_date, freq_rebal=None,
+        screen_start_date="mois_impair", fill_method="drift",
+    ):
+        """Construit Top et Worst en partageant la préparation mensuelle."""
+        screen_agg = self.screen
+        if isinstance(screen_agg, str):
+            screen_agg = pd.read_parquet(screen_agg)
+
+        if screen_start_date == "mois_pair":
+            resolved_start_date = self.find_next_closest_date(start_date, 1)
+        elif screen_start_date == "mois_impair":
+            resolved_start_date = self.find_next_closest_date(start_date, 0)
+        else:
+            resolved_start_date = start_date
+
+        self.start_date = resolved_start_date
+        builder_bottom.start_date = resolved_start_date
+        print("Premiere date du screen_agg prise en compte : ", resolved_start_date)
+
+        screen_agg = screen_agg.loc[
+            screen_agg['Date'] >= resolved_start_date
+        ].copy()
+        all_dates = sorted(screen_agg['Date'].unique())
+        if not all_dates:
+            empty = pd.DataFrame()
+            self.sec_list_historical = empty.copy()
+            builder_bottom.sec_list_historical = empty.copy()
+            return empty, empty
+
+        dates_to_keep = (
+            all_dates if freq_rebal is None else all_dates[::freq_rebal]
+        )
+        top_results = []
+        bottom_results = []
+        from tqdm import tqdm
+        for date_ in tqdm(
+            sorted(dates_to_keep), desc="Generation Sec_list Top/Worst",
+        ):
+            monthly_screen = screen_agg.loc[screen_agg['Date'] == date_]
+            top_results.append(
+                self.sec_list_spot(screen_agg_monthly=monthly_screen)
+            )
+            bottom_results.append(
+                builder_bottom._finalize_sec_list_spot(
+                    self._last_monthly_preparation,
+                )
+            )
+
+        top_history = pd.concat(top_results, ignore_index=True)
+        bottom_history = pd.concat(bottom_results, ignore_index=True)
+        self.sec_list_historical = top_history.copy()
+        builder_bottom.sec_list_historical = bottom_history.copy()
+
+        if fill_method == "drift":
+            self.sec_list_historical = self.update_ptf_with_monthly_drift(
+                self.sec_list_historical,
+            )
+            builder_bottom.sec_list_historical = (
+                builder_bottom.update_ptf_with_monthly_drift(
+                    builder_bottom.sec_list_historical,
+                )
+            )
+        elif fill_method == "copy":
+            self.sec_list_historical = self.update_ptf_with_monthly_additions(
+                self.sec_list_historical,
+            )
+            builder_bottom.sec_list_historical = (
+                builder_bottom.update_ptf_with_monthly_additions(
+                    builder_bottom.sec_list_historical,
+                )
+            )
+
+        print(
+            "Les listes historiques Top et Worst sont disponibles dans "
+            "l'attribut 'sec_list_historical' de chaque builder."
+        )
+        return top_history, bottom_history
     
 
     def backtest_calcul_all_portfolio(self,df_rebal, df_returns, col_weight,col_sector = ' Benchmark ICB Supersector ', col_date='Date', col_id = 'Company SEDOL'):
@@ -1388,7 +1497,21 @@ class PtfBuilder:
         Then, it selects the maximum of these dates, representing the most recent REBALACING date before or on that date. 
         This value is then assigned to the "Date_screen" column in new_df.
         """
-        new_df['Date_screen'] = new_df['Date_returns'].apply(lambda x: df_rebal.loc[df_rebal[col_date]<=x, col_date].max())
+        rebalance_dates = pd.DatetimeIndex(
+            sorted(pd.to_datetime(df_rebal[col_date].dropna().unique()))
+        )
+        return_dates = pd.DatetimeIndex(new_df['Date_returns'])
+        rebalance_positions = rebalance_dates.searchsorted(
+            return_dates, side='right',
+        ) - 1
+        screen_dates = np.full(
+            len(return_dates), np.datetime64('NaT'), dtype='datetime64[ns]',
+        )
+        valid_rebalance_positions = rebalance_positions >= 0
+        screen_dates[valid_rebalance_positions] = rebalance_dates.to_numpy()[
+            rebalance_positions[valid_rebalance_positions]
+        ]
+        new_df['Date_screen'] = screen_dates
         
         #ON DUPPLIQUE LES DATES DE SCREEN MENSUEL POUR CHAQUE DATE de new DF dont la colonne Date Screen = col_date de df_rebal (date de rebalancement)
         df_merge = pd.merge(df_rebal,new_df, how='left', left_on=col_date, right_on = 'Date_screen')
@@ -1400,7 +1523,22 @@ class PtfBuilder:
         returns_cum = (1+df_returns).cumprod() # On a le ttr calculé pour à partir de la 1ère date de rebalancement
         
         #ON REBASE LES DRIFT CUMULE à 1 à chaque date de rebal
-        returns_drift = returns_cum.apply(lambda x:x/returns_cum.loc[(new_df.loc[new_df['Date_screen']<=x.name,'Date_screen'].max())], axis=1)
+        cumulative_dates = pd.DatetimeIndex(returns_cum.index)
+        cumulative_rebalance_positions = rebalance_dates.searchsorted(
+            cumulative_dates, side='right',
+        ) - 1
+        cumulative_rebalance_dates = rebalance_dates.take(
+            cumulative_rebalance_positions,
+        )
+        reference_positions = returns_cum.index.get_indexer(
+            cumulative_rebalance_dates,
+        )
+        returns_cum_values = returns_cum.to_numpy(copy=False)
+        returns_drift = pd.DataFrame(
+            returns_cum_values / returns_cum_values[reference_positions],
+            index=returns_cum.index,
+            columns=returns_cum.columns,
+        )
         """
         Date	Asset_A (drift_multiplicator)	Asset_B (drift_multiplicator)
         2021-01-01	1.00	1.00
@@ -1410,34 +1548,28 @@ class PtfBuilder:
         2021-02-01  1.00    1.00
         """
 
-        #ON FLATTEN POUR METTRE EN 1 COLONNE
-        returns_drift_flat = returns_drift.stack().to_frame().reset_index(names=[col_date, col_id])
-        returns_drift_flat.columns=[col_date, col_id, 'drift_multiplicator']
-        """
-        Date	    Asset	drift_multiplicator
-        2021-01-01	Asset_A	    1.00
-        2021-01-01	Asset_B	    1.00
-        2021-01-02	Asset_A	    1.10
-        2021-01-02	Asset_B	    0.95
-        2021-01-03	Asset_A	    1.15
-        2021-01-03	Asset_B	    1.05
-        """
-
-        returns_flat=df_returns.stack().to_frame().reset_index()
-        returns_flat.columns=[col_date, col_id, 'Return']
-        """
-        Date		Asset		Return
-        2021-01-01	Asset_A		0.00
-        2021-01-01	Asset_B		0.00
-        2021-01-02	Asset_A		0.10
-        2021-01-02	Asset_B		-0.05
-        2021-01-03	Asset_A		0.05
-        2021-01-03	Asset_B		0.10
-        """
-
-    
-        df_merge = df_merge.merge(returns_drift_flat, how='left', on = [col_date, col_id]) #AJOUT DE 'drift_multiplicator'
-        df_merge = df_merge.merge(returns_flat, how='left', on = [col_date, col_id])
+        # Lecture directe des deux matrices sans les convertir en tables longues.
+        date_positions = returns_drift.index.get_indexer(
+            pd.DatetimeIndex(df_merge[col_date]),
+        )
+        security_positions = returns_drift.columns.get_indexer(
+            df_merge[col_id],
+        )
+        valid_positions = (date_positions >= 0) & (security_positions >= 0)
+        drift_values = np.full(len(df_merge), np.nan)
+        return_values = np.full(len(df_merge), np.nan)
+        drift_matrix = returns_drift.to_numpy(copy=False)
+        return_matrix = df_returns.to_numpy(copy=False)
+        drift_values[valid_positions] = drift_matrix[
+            date_positions[valid_positions],
+            security_positions[valid_positions],
+        ]
+        return_values[valid_positions] = return_matrix[
+            date_positions[valid_positions],
+            security_positions[valid_positions],
+        ]
+        df_merge['drift_multiplicator'] = drift_values
+        df_merge['Return'] = return_values
         
         #CHAQUE POIDS DAILY est DRIFTé dont celui du rebal qui est aussi drifté par 1
         df_merge[col_weight+'_drifted'] = df_merge[col_weight]*df_merge['drift_multiplicator'] 
@@ -1516,7 +1648,6 @@ class PtfBuilder:
         """
         # INDICE, SCREENAGGREGATE et SECLIST SERONT INVESTI AU 1er du mois
         # Filter Bench related securities and take the weight of bench as sec list
-        screen_agg=copy.deepcopy(screen_agg)
         indice = screen_agg.loc[screen_agg['Weight in '+indice_name]>0, [col_date, col_sedol,col_sector,'Weight in '+indice_name]].reset_index()
         indice.rename(columns={'Weight in '+indice_name:'Indice weight'}, inplace= True)
     
@@ -1601,12 +1732,18 @@ class PtfBuilder:
         if type(self.screen)==str:
             screen_agg = pd.read_parquet(self.screen)
         else:
-            screen_agg=copy.deepcopy(self.screen)
+            screen_columns = [
+                col_date, col_sedol, col_sector, col_mkt_cap,
+                'Weight in ' + self.bench,
+            ]
+            if col_isin in self.screen.columns:
+                screen_columns.insert(1, col_isin)
+            screen_agg = self.screen.loc[:, screen_columns].copy()
     
         if type(self.returns)==str:
             df_returns = pd.read_parquet(self.returns)
         else:
-            df_returns=copy.deepcopy(self.returns)
+            df_returns=self.returns
 
         # Loading sec_list
         buy_list = copy.deepcopy(sec_list)

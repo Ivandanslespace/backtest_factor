@@ -133,8 +133,11 @@ def _parquet_columns(path):
 
 
 def load_backtest_data(screen_path, returns_path, variables=None, signal_config=None,
-                       bench=DEFAULT_BENCHMARK):
-    """Charge les colonnes utiles du screen et les rendements des membres du benchmark."""
+                       bench=DEFAULT_BENCHMARK, start_date=None,
+                       lookback_periods=12):
+    """Charge les données utiles avec l'historique requis avant le backtest."""
+    if lookback_periods < 0:
+        raise ValueError('lookback_periods doit être positif ou nul.')
     screen_path = Path(screen_path)
     returns_path = Path(returns_path)
     available_screen_columns = set(_parquet_columns(screen_path))
@@ -151,7 +154,18 @@ def load_backtest_data(screen_path, returns_path, variables=None, signal_config=
     if missing_columns:
         raise KeyError(f'Colonnes absentes du screen : {missing_columns}')
 
-    screen = pd.read_parquet(screen_path, columns=requested_columns)
+    screen_filters = None
+    resolved_start_date = None
+    if start_date is not None:
+        resolved_start_date = pd.Timestamp(start_date)
+        screen_start_date = resolved_start_date - pd.DateOffset(
+            months=int(lookback_periods),
+        )
+        screen_filters = [('Date', '>=', screen_start_date.to_pydatetime())]
+
+    screen = pd.read_parquet(
+        screen_path, columns=requested_columns, filters=screen_filters,
+    )
     weight_column = f'Weight in {bench}'
     benchmark_sedols = (
         screen.loc[screen[weight_column].fillna(0).gt(0), 'Company SEDOL']
@@ -167,6 +181,9 @@ def load_backtest_data(screen_path, returns_path, variables=None, signal_config=
     if not return_columns:
         raise ValueError('Aucun SEDOL du benchmark n’est disponible dans les rendements.')
     returns = pd.read_parquet(returns_path, columns=return_columns)
+    if resolved_start_date is not None:
+        returns.index = pd.to_datetime(returns.index)
+        returns = returns.loc[returns.index >= resolved_start_date]
 
     print(
         f'Données chargées : {len(screen.columns)} colonnes screen et '
@@ -181,15 +198,17 @@ def _backtest_inputs(screen, returns, metric, bench):
         raise TypeError('screen et returns doivent être des DataFrames pandas.')
     market_cap_column = 'Benchmark Market Value Millions in EUR '
     source_market_cap = market_cap_column.rstrip()
-    if market_cap_column not in screen.columns:
-        if source_market_cap not in screen.columns:
-            raise KeyError(f'Colonne requise absente : {market_cap_column}')
-        screen[market_cap_column] = screen[source_market_cap]
+    if market_cap_column in screen.columns:
+        selected_market_cap = market_cap_column
+    elif source_market_cap in screen.columns:
+        selected_market_cap = source_market_cap
+    else:
+        raise KeyError(f'Colonne requise absente : {market_cap_column}')
 
     weight_column = f'Weight in {bench}'
     screen_columns = [
         'Date', 'Company SEDOL', ' Benchmark ICB Supersector ',
-        weight_column, market_cap_column,
+        weight_column, selected_market_cap,
     ]
     if metric is not None:
         screen_columns.append(metric)
@@ -212,6 +231,10 @@ def _backtest_inputs(screen, returns, metric, bench):
         raise ValueError('Aucun rendement ne correspond aux membres du benchmark.')
 
     slim_screen = screen.loc[:, screen_columns].copy()
+    if selected_market_cap != market_cap_column:
+        slim_screen.rename(
+            columns={selected_market_cap: market_cap_column}, inplace=True,
+        )
     slim_returns = returns.loc[:, return_columns].copy()
     return slim_screen, slim_returns
 
@@ -543,6 +566,12 @@ def run_top_worst_backtest(screen, returns, metric, list_noire_path, bench=DEFAU
         builder.freq_rebal = freq_rebal
         builder.fill_method = fill_method
 
+    builder_top.generic_histo_seclists_pair(
+        builder_bottom=builder_worst,
+        start_date=pd.Timestamp(start_date),
+        freq_rebal=freq_rebal,
+        fill_method=fill_method,
+    )
     comparison = builder_top.calculate_top_vs_bottom_results(
         builder_bottom=builder_worst,
         period_breakpoints=resolved_breakpoints,

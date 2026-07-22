@@ -1,6 +1,11 @@
+import hashlib
+import tempfile
 import unittest
+import warnings
+from pathlib import Path
 from unittest.mock import Mock, patch
 
+import numpy as np
 import pandas as pd
 
 import func
@@ -38,6 +43,109 @@ def _fake_backtest(screen, returns, metric, list_noire_path, metadata=None, **op
         'top_bench_ratio': 0.0,
         'top_worst_ratio': 0.0,
     }
+
+
+def _deterministic_backtest_data():
+    """Construit un petit marché stable destiné aux tests d'équivalence."""
+    benchmark = 'STOXX EUROPE 600'
+    dates = pd.date_range('2023-12-31', periods=8, freq='ME')
+    rows = []
+    sedols = []
+    for sector in range(1, 20):
+        for company in range(4):
+            isin = f'ISIN{sector:02d}{company}'
+            sedol = f'S{sector:02d}{company:02d}-R'
+            sedols.append(sedol)
+            for date_index, date in enumerate(dates):
+                rows.append({
+                    'Date': date,
+                    'ISIN': isin,
+                    'Company SEDOL': sedol,
+                    ' Benchmark ICB Supersector ': float(sector),
+                    f'Weight in {benchmark}': 1 / 76,
+                    'Benchmark Market Value Millions in EUR ': float(
+                        100 + sector * 10 + company
+                    ),
+                    'Signal': float(company * 10 + sector + date_index / 10),
+                })
+    screen = pd.DataFrame(rows)
+    return_dates = pd.bdate_range('2024-01-01', '2024-09-10')
+    observations = np.arange(len(return_dates))
+    returns = pd.DataFrame({
+        sedol: (
+            ((index % 7) - 3) * 0.00005
+            + np.sin(observations + index) * 0.0001
+        )
+        for index, sedol in enumerate(sedols)
+    }, index=return_dates)
+    return screen, returns, benchmark
+
+
+def _frame_digest(frame):
+    """Calcule une empreinte stricte et reproductible d'un tableau de résultat."""
+    content = frame.to_csv(
+        index=True, float_format='%.17g', date_format='%Y-%m-%dT%H:%M:%S',
+    ).encode()
+    return hashlib.sha256(content).hexdigest()
+
+
+class TestChargementDonnees(unittest.TestCase):
+    """Vérifie la projection des colonnes et la fenêtre historique chargée."""
+
+    def test_start_date_conserve_uniquement_le_lookback_demande(self):
+        benchmark = 'STOXX EUROPE 600'
+        screen = pd.DataFrame({
+            'Date': pd.to_datetime([
+                '2022-12-31', '2023-06-30', '2023-12-31', '2024-01-31',
+            ]),
+            'ISIN': ['A', 'A', 'A', 'A'],
+            'Company SEDOL': ['AAA-R'] * 4,
+            ' Benchmark ICB Supersector ': [1.0] * 4,
+            'Exchange Country Region': ['Europe'] * 4,
+            f'Weight in {benchmark}': [1.0] * 4,
+            'Benchmark Market Value Millions in EUR ': [100.0] * 4,
+            'Signal': [1.0, 2.0, 3.0, 4.0],
+            'Colonne inutile': [9.0] * 4,
+        })
+        returns = pd.DataFrame(
+            {'AAA-R': [0.01, 0.02, 0.03], 'HORS-BENCH': [0.0, 0.0, 0.0]},
+            index=pd.to_datetime(['2023-12-29', '2024-01-02', '2024-01-03']),
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            directory = Path(directory)
+            screen_path = directory / 'screen.parquet'
+            returns_path = directory / 'returns.parquet'
+            screen.to_parquet(screen_path, index=False)
+            returns.to_parquet(returns_path)
+            loaded_screen, loaded_returns = func.load_backtest_data(
+                screen_path,
+                returns_path,
+                variables=['Signal'],
+                bench=benchmark,
+                start_date='2024-01-01',
+                lookback_periods=6,
+            )
+
+        self.assertEqual(loaded_screen['Date'].min(), pd.Timestamp('2023-12-31'))
+        self.assertNotIn('Colonne inutile', loaded_screen.columns)
+        self.assertEqual(list(loaded_returns.columns), ['AAA-R'])
+        self.assertEqual(loaded_returns.index.min(), pd.Timestamp('2024-01-02'))
+
+    def test_lookback_negatif_est_refuse(self):
+        with tempfile.TemporaryDirectory() as directory:
+            screen_path = Path(directory) / 'screen.parquet'
+            returns_path = Path(directory) / 'returns.parquet'
+            pd.DataFrame({'Date': pd.to_datetime(['2024-01-31'])}).to_parquet(
+                screen_path, index=False,
+            )
+            pd.DataFrame(index=pd.to_datetime(['2024-01-31'])).to_parquet(
+                returns_path,
+            )
+            with self.assertRaises(ValueError):
+                func.load_backtest_data(
+                    screen_path, returns_path, start_date='2024-01-01',
+                    lookback_periods=-1,
+                )
 
 
 class TestConfigurationSignaux(unittest.TestCase):
@@ -331,6 +439,73 @@ class TestBenchmarkExplicite(unittest.TestCase):
         self.assertIs(retained_result['worst_builder'], worst)
 
 
+class TestOptimisationsMemoire(unittest.TestCase):
+    """Vérifie le partage des entrées et de la préparation mensuelle."""
+
+    def test_builders_partagent_les_entrees_en_lecture_seule(self):
+        screen, returns, benchmark = _deterministic_backtest_data()
+        builder = PtfBuilder(
+            screen=screen, returns=returns, bench=benchmark,
+            percentile=0.13, metrics='Signal', liste_noire=None,
+        )
+
+        self.assertIs(builder.screen, screen)
+        self.assertIs(builder.returns, returns)
+
+    def test_projection_ne_modifie_pas_le_screen_source(self):
+        screen, returns, benchmark = _deterministic_backtest_data()
+        target = 'Benchmark Market Value Millions in EUR '
+        source = target.rstrip()
+        screen.rename(columns={target: source}, inplace=True)
+
+        projected_screen, _ = func._backtest_inputs(
+            screen, returns, metric='Signal', bench=benchmark,
+        )
+
+        self.assertNotIn(target, screen.columns)
+        self.assertIn(target, projected_screen.columns)
+
+    def test_secteur_manquant_conserve_le_rang_global_historique(self):
+        builder = PtfBuilder.__new__(PtfBuilder)
+        builder.score_neutral = 'ICB 19'
+        frame = pd.DataFrame({
+            'Score': [1.0, 2.0, 3.0],
+            ' Benchmark ICB Supersector ': [1.0, 1.0, np.nan],
+        })
+
+        result = builder.neutralise_score_by_secteur(frame, ['Score'])
+
+        self.assertEqual(result['Score'].tolist(), [0.0, 1.0, 1.0])
+
+    def test_worst_reutilise_la_preparation_mensuelle_du_top(self):
+        screen, returns, benchmark = _deterministic_backtest_data()
+        top = PtfBuilder(
+            screen=screen, returns=returns, bench=benchmark,
+            percentile=0.13, metrics='Signal', liste_noire=None, Top=True,
+            esg_exclusion=0,
+        )
+        worst = PtfBuilder(
+            screen=screen, returns=returns, bench=benchmark,
+            percentile=0.13, metrics='Signal', liste_noire=None, Top=False,
+            esg_exclusion=0,
+        )
+
+        with (
+            warnings.catch_warnings(),
+            patch('tqdm.tqdm', side_effect=lambda values, **kwargs: values),
+            patch.object(worst, 'sec_list_spot', wraps=worst.sec_list_spot) as call,
+        ):
+            warnings.simplefilter('ignore')
+            top.generic_histo_seclists_pair(
+                worst, start_date=pd.Timestamp('2024-01-01'),
+                freq_rebal=1, fill_method='copy',
+            )
+
+        call.assert_not_called()
+        self.assertFalse(top.sec_list_historical.empty)
+        self.assertFalse(worst.sec_list_historical.empty)
+
+
 class TestReconstructionPeriodes(unittest.TestCase):
     """Vérifie la réunion de la période totale et des sous-périodes."""
 
@@ -363,6 +538,51 @@ class TestReconstructionPeriodes(unittest.TestCase):
         self.assertEqual(combined['period_label'].tolist(), [
             'Période totale', 'Depuis 2020',
         ])
+
+
+class TestEquivalenceMoteur(unittest.TestCase):
+    """Fige les positions, performances et métriques du moteur de référence."""
+
+    def test_positions_performances_et_metriques_restent_identiques(self):
+        screen, returns, benchmark = _deterministic_backtest_data()
+        with (
+            warnings.catch_warnings(),
+            patch('tqdm.tqdm', new=lambda iterable, **kwargs: iterable),
+        ):
+            warnings.simplefilter('ignore')
+            benchmark_performance = func.calculate_benchmark_performance(
+                screen, returns, bench=benchmark, start_date='2024-01-01',
+            )
+            result = func.run_top_worst_backtest(
+                screen, returns, 'Signal', None,
+                bench=benchmark, bench_perf=benchmark_performance,
+                start_date='2024-01-01', period_breakpoints=[],
+                show_plot=False, build_figure=False,
+            )
+
+        expected = {
+            'performance': '448c604bccd590c6d96cbf3a719bb108929170839c00fa9a80a23a569115995f',
+            'top_holdings': '838808f9e98aec40e114e15ab41a28e9ae288814aee17b6428d24f6d8ae28758',
+            'worst_holdings': 'bd8406e4bb86ff63e8eea684b66fb6deb5cafc9b6b3f71ba44b10116e02732f0',
+            'period_metrics': 'e0fa7356c7f23fd8ac340259928799a6b477e71b5ba63e88912aa41c920251b7',
+        }
+        for name, digest in expected.items():
+            self.assertEqual(_frame_digest(result[name]), digest, name)
+        self.assertEqual(
+            hashlib.sha256(repr(result['classic_metrics']).encode()).hexdigest(),
+            'e48ca6a22d763d21a6a54c8cd3e8ebd5c52ab9974cdfed161ff08c9c34b9a476',
+        )
+
+    def test_isin_peut_rester_index_du_screen_parquet(self):
+        screen, returns, benchmark = _deterministic_backtest_data()
+        screen = screen.set_index('ISIN')
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore')
+            performance = func.calculate_benchmark_performance(
+                screen, returns, bench=benchmark, start_date='2024-01-01',
+            )
+
+        self.assertFalse(performance.empty)
 
 
 if __name__ == '__main__':
