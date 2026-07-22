@@ -309,13 +309,44 @@ LOWER_IS_BETTER = {
 # Les horizons comptent les observations successives de chaque société.
 COMPARISON_PERIODS = (1, 3, 6, 12)
 COMPARISON_BASE_DIMENSIONS = ('pct', 'diff', 'rank_diff')
+
+
+def make_signal_dimensions(periods=(1,), transformations=(
+        'level', 'pct', 'diff', 'rank_diff')):
+    """Construit les dimensions unitaires pour les horizons demandés."""
+    selected_periods = tuple(dict.fromkeys(periods))
+    unknown_periods = set(selected_periods) - set(COMPARISON_PERIODS)
+    if unknown_periods:
+        raise ValueError(f'Horizons inconnus : {sorted(unknown_periods)}')
+
+    selected_transformations = tuple(dict.fromkeys(transformations))
+    allowed_transformations = ('level',) + COMPARISON_BASE_DIMENSIONS
+    unknown_transformations = (
+        set(selected_transformations) - set(allowed_transformations)
+    )
+    if unknown_transformations:
+        raise ValueError(
+            f'Transformations inconnues : {sorted(unknown_transformations)}'
+        )
+
+    dimensions = []
+    for transformation in selected_transformations:
+        if transformation == 'level':
+            dimensions.append('level')
+            continue
+        dimensions.extend(
+            f'{transformation}_{period}' for period in selected_periods
+        )
+    return tuple(dimensions)
+
+
 COMPARISON_DIMENSIONS = tuple(
     f'{dimension}_{period}'
     for dimension in COMPARISON_BASE_DIMENSIONS
     for period in COMPARISON_PERIODS
 )
 SIGNAL_DIMENSIONS = ('level',) + COMPARISON_DIMENSIONS
-DEFAULT_SIGNAL_DIMENSIONS = ('level', 'pct_1', 'diff_1', 'rank_diff_1')
+DEFAULT_SIGNAL_DIMENSIONS = make_signal_dimensions()
 LEGACY_DIMENSION_ALIASES = {
     dimension: f'{dimension}_1' for dimension in COMPARISON_BASE_DIMENSIONS
 }

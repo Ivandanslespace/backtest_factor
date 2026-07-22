@@ -5,7 +5,7 @@ import pandas as pd
 
 import func
 from BacktestEngine import PtfBuilder
-from factor_config import make_signal_config, signal_options
+from factor_config import make_signal_config, make_signal_dimensions, signal_options
 
 
 def _screen_minimal():
@@ -70,6 +70,24 @@ class TestConfigurationSignaux(unittest.TestCase):
             'Revenue 5Y CAGR | diff_1',
             'Revenue 5Y CAGR | rank_diff_1',
         ])
+
+    def test_generation_de_toutes_les_dimensions_unitaires(self):
+        dimensions = make_signal_dimensions(periods=(1, 3, 6, 12))
+
+        self.assertEqual(dimensions, (
+            'level',
+            'pct_1', 'pct_3', 'pct_6', 'pct_12',
+            'diff_1', 'diff_3', 'diff_6', 'diff_12',
+            'rank_diff_1', 'rank_diff_3', 'rank_diff_6', 'rank_diff_12',
+        ))
+
+        screen = _screen_minimal()
+        with patch.object(func, 'run_top_worst_backtest', side_effect=_fake_backtest):
+            batch = func.test_unitary_signals(
+                screen, pd.DataFrame(), ['Revenue 5Y CAGR'], None,
+                dimensions=dimensions,
+            )
+        self.assertEqual(len(batch['results']), 13)
 
     def test_anciens_poids_designent_une_periode(self):
         options = signal_options(pct=0.3, diff=0.4, rank_diff=0.5)
