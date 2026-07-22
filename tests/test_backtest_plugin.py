@@ -948,6 +948,26 @@ class TestExportCumulatif(unittest.TestCase):
 class TestReconstructionPeriodes(unittest.TestCase):
     """Vérifie la réunion de la période totale et des sous-périodes."""
 
+    def test_score_robuste_est_calcule_sur_une_periode_courte(self):
+        dates = pd.bdate_range('2020-01-02', periods=60)
+        performance = pd.DataFrame({
+            'Top': 100.0 * (1.0015 ** np.arange(len(dates))),
+            'Worst': 100.0 * (0.9990 ** np.arange(len(dates))),
+            'Bench': 100.0 * (1.0005 ** np.arange(len(dates))),
+        }, index=dates)
+        builder = PtfBuilder.__new__(PtfBuilder)
+
+        period_metrics = builder._calculate_period_metrics(
+            performance, period_breakpoints=[2020],
+        )
+
+        since_2020 = period_metrics.loc[
+            period_metrics['period_id'].eq('since_2020'),
+        ].iloc[0]
+        self.assertTrue(pd.notna(since_2020['robust_score']))
+        self.assertTrue(pd.notna(since_2020['top_bench_ratio']))
+        self.assertTrue(pd.notna(since_2020['top_worst_ratio']))
+
     def test_reconstruction_reunit_total_et_sous_periode(self):
         summary = pd.DataFrame([{
             'test_path': 'unitary / Signal | level',
@@ -969,6 +989,7 @@ class TestReconstructionPeriodes(unittest.TestCase):
             'period_id': 'depuis_2020',
             'period_label': 'Depuis 2020',
             'active_cagr': 0.03,
+            'robust_score': 0.2,
         }])
 
         combined = func._combine_total_and_period_metrics(summary, periods)
@@ -977,6 +998,7 @@ class TestReconstructionPeriodes(unittest.TestCase):
         self.assertEqual(combined['period_label'].tolist(), [
             'Période totale', 'Depuis 2020',
         ])
+        self.assertEqual(combined.loc[1, 'robust_score'], 0.2)
 
 
 class TestComparaisonPerformance(unittest.TestCase):
@@ -1039,7 +1061,7 @@ class TestEquivalenceMoteur(unittest.TestCase):
             'performance': '448c604bccd590c6d96cbf3a719bb108929170839c00fa9a80a23a569115995f',
             'top_holdings': '838808f9e98aec40e114e15ab41a28e9ae288814aee17b6428d24f6d8ae28758',
             'worst_holdings': 'bd8406e4bb86ff63e8eea684b66fb6deb5cafc9b6b3f71ba44b10116e02732f0',
-            'period_metrics': 'e0fa7356c7f23fd8ac340259928799a6b477e71b5ba63e88912aa41c920251b7',
+            'period_metrics': 'ee20e457b3bf95137b7fb74ff358513dc001ca527c971ba444bf5cc37e622943',
         }
         for name, digest in expected.items():
             self.assertEqual(_frame_digest(result[name]), digest, name)

@@ -1810,8 +1810,7 @@ def _finalize_backtest_metrics(metrics):
         ranked_summary = _rank_backtest_summary(metrics.loc[total_mask].copy())
         ranking_columns = [
             column for column in ranked_summary.columns
-            if column in ('robust_rank_global', 'robust_rank_within_type')
-            or column.endswith('_delta_vs_baseline')
+            if column.endswith('_delta_vs_baseline')
         ]
         for column in ranking_columns:
             ranks = ranked_summary.set_index('test_path')[column]
@@ -1819,7 +1818,9 @@ def _finalize_backtest_metrics(metrics):
                 total_mask, 'test_path'
             ].map(ranks)
 
-    ranking_metrics = ('active_cagr', 'top_worst_cagr', 'top_sharpe_ratio')
+    ranking_metrics = (
+        'robust_score', 'active_cagr', 'top_worst_cagr', 'top_sharpe_ratio',
+    )
     period_ranking_columns = [
         f'{metric}_{suffix}'
         for metric in ranking_metrics

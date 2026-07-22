@@ -2150,7 +2150,9 @@ class PtfBuilder:
                 print(f"Plot saved as HTML to: {temp_path}")
                 print("Please open this file in your web browser to view the plot.")
 
-    def _calculate_robust_score(self, perf_top, perf_bottom, perf_bench):
+    def _calculate_robust_score(self, perf_top, perf_bottom, perf_bench,
+                                allow_short_history=False,
+                                store_metrics=True):
         """
         Calcule un score de robustesse à partir des performances relatives.
 
@@ -2164,13 +2166,26 @@ class PtfBuilder:
             axis=1,
         ).dropna()
 
-        if len(performances) < window:
-            self.robust_metrics = {
+        if len(performances) < window and not allow_short_history:
+            robust_metrics = {
                 'active_max_drawdown': float('nan'),
                 'tracking_error_annualized': float('nan'),
                 'min_rolling_3y_cagr': float('nan'),
                 'observation_count': len(performances),
             }
+            if store_metrics:
+                self.robust_metrics = robust_metrics
+            return float('nan'), float('nan'), float('nan')
+
+        if len(performances) < 2:
+            robust_metrics = {
+                'active_max_drawdown': float('nan'),
+                'tracking_error_annualized': float('nan'),
+                'min_rolling_3y_cagr': float('nan'),
+                'observation_count': len(performances),
+            }
+            if store_metrics:
+                self.robust_metrics = robust_metrics
             return float('nan'), float('nan'), float('nan')
 
         perf_top = performances['Top']
@@ -2196,8 +2211,12 @@ class PtfBuilder:
         tracking_error_annualized = diff_returns.std() * (252 ** 0.5)
 
         rolling_ratio = perf_top / perf_bench
-        start_vals = rolling_ratio.shift(window - 1)
-        rolling_cagr = (rolling_ratio / start_vals) ** (1 / 3) - 1
+        effective_window = min(window, len(performances))
+        effective_years = 3.0 if effective_window == window else (
+            (effective_window - 1) / 252
+        )
+        start_vals = rolling_ratio.shift(effective_window - 1)
+        rolling_cagr = (rolling_ratio / start_vals) ** (1 / effective_years) - 1
         min_rolling_cagr = abs(min(rolling_cagr.min(), 0))
 
         robust_score = (
@@ -2207,12 +2226,14 @@ class PtfBuilder:
             - tracking_error_annualized
             - min_rolling_cagr
         )
-        self.robust_metrics = {
+        robust_metrics = {
             'active_max_drawdown': active_mdd,
             'tracking_error_annualized': tracking_error_annualized,
             'min_rolling_3y_cagr': min_rolling_cagr,
             'observation_count': len(performances),
         }
+        if store_metrics:
+            self.robust_metrics = robust_metrics
         return robust_score, top_bench_ratio, top_worst_ratio
 
     def _calculate_classic_metrics(self, performance, benchmark=None,
@@ -2289,13 +2310,14 @@ class PtfBuilder:
         }
 
     def _calculate_period_metrics(self, performance, period_breakpoints):
-        """Calcule les rendements annualisés et métriques classiques par sous-période."""
+        """Calcule les métriques de chaque sous-période avec score robuste local."""
         periods = build_periods_from_breakpoints(period_breakpoints or [])
         columns = (
             'period_id', 'period_label', 'requested_start_date',
             'requested_end_date', 'actual_start_date', 'actual_end_date',
             'observation_count', 'years', 'top_cagr', 'worst_cagr',
             'bench_cagr', 'active_cagr', 'top_worst_cagr',
+            'robust_score', 'top_bench_ratio', 'top_worst_ratio',
         )
         if performance.empty or not periods:
             return pd.DataFrame(columns=columns)
@@ -2341,6 +2363,9 @@ class PtfBuilder:
                 'bench_cagr': float('nan'),
                 'active_cagr': float('nan'),
                 'top_worst_cagr': float('nan'),
+                'robust_score': float('nan'),
+                'top_bench_ratio': float('nan'),
+                'top_worst_ratio': float('nan'),
             }
             if len(period_data) >= 2:
                 first_date = period_data.index[0]
@@ -2368,6 +2393,20 @@ class PtfBuilder:
                         f'{portfolio.lower()}_{metric}': value
                         for metric, value in metrics.items()
                     })
+                robust_score, top_bench_ratio, top_worst_ratio = (
+                    self._calculate_robust_score(
+                        period_data['Top'],
+                        period_data['Worst'],
+                        period_data['Bench'],
+                        allow_short_history=True,
+                        store_metrics=False,
+                    )
+                )
+                row.update({
+                    'robust_score': robust_score,
+                    'top_bench_ratio': top_bench_ratio,
+                    'top_worst_ratio': top_worst_ratio,
+                })
             rows.append(row)
         return pd.DataFrame(rows)
 
