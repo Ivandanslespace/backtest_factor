@@ -132,9 +132,34 @@ def _parquet_columns(path):
     return parquet.ParquetFile(path).schema_arrow.names
 
 
+def compact_screen_dtypes(screen):
+    """Compacte les identifiants répétés sans réduire la précision numérique."""
+    if screen.index.name == 'ISIN' and not isinstance(
+        screen.index, pd.CategoricalIndex,
+    ):
+        screen.index = pd.CategoricalIndex(screen.index, name='ISIN')
+    for column in ('ISIN', 'Company SEDOL', 'Exchange Country Region'):
+        if column in screen.columns and not isinstance(
+            screen[column].dtype, pd.CategoricalDtype,
+        ):
+            screen[column] = screen[column].astype('category')
+    for column in (
+        ' Benchmark ICB Supersector ', ' Benchmark ICB Industry ',
+    ):
+        if column not in screen.columns:
+            continue
+        numeric = pd.to_numeric(screen[column], errors='coerce')
+        finite = numeric.dropna()
+        if finite.empty or not np.equal(finite, np.floor(finite)).all():
+            continue
+        if finite.min() >= -128 and finite.max() <= 127:
+            screen[column] = numeric.astype('Int8')
+    return screen
+
+
 def load_backtest_data(screen_path, returns_path, variables=None, signal_config=None,
                        bench=DEFAULT_BENCHMARK, start_date=None,
-                       lookback_periods=12):
+                       lookback_periods=12, compact_dtypes=True):
     """Charge les données utiles avec l'historique requis avant le backtest."""
     if lookback_periods < 0:
         raise ValueError('lookback_periods doit être positif ou nul.')
@@ -166,6 +191,8 @@ def load_backtest_data(screen_path, returns_path, variables=None, signal_config=
     screen = pd.read_parquet(
         screen_path, columns=requested_columns, filters=screen_filters,
     )
+    if compact_dtypes:
+        screen = compact_screen_dtypes(screen)
     weight_column = f'Weight in {bench}'
     benchmark_sedols = (
         screen.loc[screen[weight_column].fillna(0).gt(0), 'Company SEDOL']
@@ -256,12 +283,21 @@ def calculate_benchmark_performance(screen, returns, bench=DEFAULT_BENCHMARK,
     return builder.perf_bench.copy()
 
 
+def _ensure_monthly_base_cache(backtest_options):
+    """Ajoute un cache mensuel local lorsqu'aucun choix explicite n'est fourni."""
+    if 'monthly_base_cache' in backtest_options:
+        return backtest_options
+    return {**backtest_options, 'monthly_base_cache': {}}
+
+
 def handle_missing_values(df, columns, group_cols=None):
     """Remplace les valeurs manquantes par la médiane du groupe disponible."""
     group_cols = GROUP_COLS if group_cols is None else group_cols
     for col in columns:
         if col in df.columns:
-            df[col] = df[col].fillna(df.groupby(group_cols)[col].transform('median'))
+            df[col] = df[col].fillna(
+                df.groupby(group_cols, observed=False)[col].transform('median')
+            )
     return df
 
 
@@ -269,7 +305,7 @@ def neutralize_score(df, score_col, higher_is_better, group_cols=None):
     """Convertit une variable en rang centile de 0 à 10 dans chaque groupe."""
     group_cols = GROUP_COLS if group_cols is None else group_cols
     df[score_col] = (
-        df.groupby(group_cols)[score_col]
+        df.groupby(group_cols, observed=False)[score_col]
         .rank(pct=True, ascending=higher_is_better) * 10
     )
     return df
@@ -360,7 +396,8 @@ def prepare_signals(screen, signal_config, group_cols=None, copy_data=False):
         resolved_config[prepared_variable] = copy.deepcopy(options)
         prepared_cols.append(prepared_variable)
 
-    prepared.replace([np.inf, -np.inf], np.nan, inplace=True)
+    for column in prepared_cols:
+        prepared[column] = prepared[column].replace([np.inf, -np.inf], np.nan)
     return handle_missing_values(prepared, prepared_cols, group_cols), resolved_config
 
 
@@ -386,49 +423,92 @@ def _component_weight(options, dimension):
     return weight if pd.notna(weight) and weight > 0 else 0.0
 
 
-def build_signal_component(screen, variable, options, group_cols=None, keep_derived_columns=True):
+def prepare_signal_derivatives(screen, variable, options, dimensions,
+                               group_cols=None):
+    """Génère tous les horizons demandés après un tri unique par titre et date."""
+    group_cols = GROUP_COLS if group_cols is None else group_cols
+    dimensions = tuple(dict.fromkeys(
+        _canonical_dimension(dimension) for dimension in dimensions
+        if _canonical_dimension(dimension) != 'level'
+    ))
+    unknown_dimensions = set(dimensions) - set(COMPARISON_DIMENSIONS)
+    if unknown_dimensions:
+        raise ValueError(f'Dimensions dérivées inconnues : {sorted(unknown_dimensions)}')
+    if not dimensions:
+        return screen
+
+    isin_values = (
+        screen['ISIN'].to_numpy()
+        if 'ISIN' in screen.columns else screen.index.to_numpy()
+    )
+    ordered_data = {
+        '_position': np.arange(len(screen)),
+        '_isin': isin_values,
+        '_date': pd.to_datetime(screen['Date']).to_numpy(),
+        '_value': screen[variable].to_numpy(),
+    }
+    if any(dimension.startswith('rank_diff_') for dimension in dimensions):
+        ordered_data['_rank_value'] = (
+            screen.groupby(group_cols, observed=False)[variable]
+            .rank(pct=True, ascending=options['higher_is_better']) * 10
+        ).to_numpy()
+    ordered = pd.DataFrame(ordered_data).sort_values(['_isin', '_date'])
+    ordered_groups = ordered.groupby('_isin')
+    filled_values = (
+        ordered_groups['_value'].ffill()
+        if any(dimension.startswith('pct_') for dimension in dimensions)
+        else None
+    )
+    derivatives = {}
+    for dimension in dimensions:
+        base_dimension, period_text = dimension.rsplit('_', 1)
+        period = int(period_text)
+        if base_dimension == 'pct':
+            derived = filled_values.groupby(ordered['_isin']).pct_change(
+                periods=period, fill_method=None,
+            )
+        elif base_dimension == 'rank_diff':
+            derived = ordered_groups['_rank_value'].diff(periods=period)
+        else:
+            derived = ordered_groups['_value'].diff(periods=period)
+        derivatives[f'{variable}__{dimension}'] = pd.Series(
+            derived.to_numpy(), index=ordered['_position'],
+        ).sort_index().to_numpy()
+
+    screen[list(derivatives)] = pd.DataFrame(
+        derivatives, index=screen.index,
+    )
+    # Regroupe les blocs après l'ajout massif pour éviter la fragmentation pandas.
+    screen._consolidate_inplace()
+    return screen
+
+
+def build_signal_component(screen, variable, options, group_cols=None,
+                           keep_derived_columns=True,
+                           precomputed_dimensions=None):
     """Construit le niveau et les variations explicites à 1, 3, 6 ou 12 périodes."""
     group_cols = GROUP_COLS if group_cols is None else group_cols
     contribution = pd.Series(0.0, index=screen.index)
+    precomputed_dimensions = set(precomputed_dimensions or ())
 
     components = [('level', variable)] + [
         (dimension, f'{variable}__{dimension}')
         for dimension in COMPARISON_DIMENSIONS
     ]
+    active_dimensions = [
+        component for component, _ in components
+        if component != 'level'
+        and _component_weight(options, component) > 0
+        and component not in precomputed_dimensions
+    ]
+    screen = prepare_signal_derivatives(
+        screen, variable, options, active_dimensions, group_cols,
+    )
 
     for component, column in components:
         weight = _component_weight(options, component)
         if weight == 0:
             continue
-        if component != 'level':
-            base_dimension, period_text = component.rsplit('_', 1)
-            period = int(period_text)
-            isin_values = (
-                screen['ISIN'].to_numpy()
-                if 'ISIN' in screen.columns else screen.index.to_numpy()
-            )
-            source_values = screen[variable]
-            if base_dimension == 'rank_diff':
-                source_values = (
-                    screen.groupby(group_cols)[variable]
-                    .rank(pct=True, ascending=options['higher_is_better']) * 10
-                )
-            ordered = pd.DataFrame({
-                '_position': np.arange(len(screen)),
-                '_isin': isin_values,
-                '_date': pd.to_datetime(screen['Date']).to_numpy(),
-                '_value': source_values.to_numpy(),
-            }).sort_values(['_isin', '_date'])
-            if base_dimension == 'pct':
-                filled_values = ordered.groupby('_isin')['_value'].ffill()
-                derived = filled_values.groupby(ordered['_isin']).pct_change(
-                    periods=period, fill_method=None,
-                )
-            else:
-                derived = ordered.groupby('_isin')['_value'].diff(periods=period)
-            screen[column] = pd.Series(
-                derived.to_numpy(), index=ordered['_position']
-            ).sort_index().to_numpy()
 
         screen[column] = screen[column].replace([np.inf, -np.inf], np.nan)
         screen = handle_missing_values(screen, [column], group_cols)
@@ -449,13 +529,20 @@ def build_signal_component(screen, variable, options, group_cols=None, keep_deri
 
 
 def calculate_composite_score(screen, score_col, signal_config, group_cols=None,
-                              copy_data=False, keep_derived_columns=True):
+                              copy_data=False, keep_derived_columns=True,
+                              signals_prepared=False,
+                              precomputed_derivatives=None):
     """Agrège les signaux et conserve par défaut les variables dérivées dans screen."""
     group_cols = GROUP_COLS if group_cols is None else group_cols
     signal_config = _resolve_signal_config(screen, signal_config)
-    prepared, resolved_config = prepare_signals(
-        screen, signal_config, group_cols, copy_data=copy_data,
-    )
+    if signals_prepared:
+        prepared = screen.copy() if copy_data else screen
+        resolved_config = copy.deepcopy(signal_config)
+    else:
+        prepared, resolved_config = prepare_signals(
+            screen, signal_config, group_cols, copy_data=copy_data,
+        )
+    precomputed_derivatives = precomputed_derivatives or {}
     total_score = pd.Series(0.0, index=prepared.index)
     active_signals = 0
 
@@ -468,6 +555,7 @@ def calculate_composite_score(screen, score_col, signal_config, group_cols=None,
         prepared, contribution = build_signal_component(
             prepared, variable, options, group_cols,
             keep_derived_columns=keep_derived_columns,
+            precomputed_dimensions=precomputed_derivatives.get(variable),
         )
         total_score = total_score.add(contribution, fill_value=0.0)
         active_signals += 1
@@ -541,8 +629,17 @@ def run_top_worst_backtest(screen, returns, metric, list_noire_path, bench=DEFAU
                            save_path=None, metadata=None, period_breakpoints=None,
                            build_figure=True, bench_perf=None,
                            start_date=DEFAULT_START_DATE, freq_rebal=1,
-                           fill_method='copy', retain_builders=False):
+                           fill_method='copy', retain_builders=False,
+                           monthly_base_cache=None):
     """Exécute Top/Worst et ne conserve les builders que sur demande."""
+    if monthly_base_cache is not None:
+        if not isinstance(monthly_base_cache, dict):
+            raise TypeError('monthly_base_cache doit être un dictionnaire ou None.')
+        source_id = id(screen)
+        cached_source_id = monthly_base_cache.get('_source_id')
+        if cached_source_id != source_id:
+            monthly_base_cache.clear()
+            monthly_base_cache['_source_id'] = source_id
     backtest_screen, backtest_returns = _backtest_inputs(
         screen, returns, metric=metric, bench=bench,
     )
@@ -554,11 +651,13 @@ def run_top_worst_backtest(screen, returns, metric, list_noire_path, bench=DEFAU
         backtest_screen, backtest_returns, ptf_name=f'{metric}_top', bench=bench,
         percentile=percentile, esg_exclusion=0, liste_noire=list_noire_path,
         metrics=metric, Top=True, bench_perf=bench_perf,
+        monthly_base_cache=monthly_base_cache,
     )
     builder_worst = PtfBuilder(
         backtest_screen, backtest_returns, ptf_name=f'{metric}_worst', bench=bench,
         percentile=percentile, esg_exclusion=0, liste_noire=list_noire_path,
         metrics=metric, Top=False, bench_perf=bench_perf,
+        monthly_base_cache=monthly_base_cache,
     )
 
     for builder in (builder_top, builder_worst):
@@ -630,6 +729,7 @@ def test_unitary_signals(screen, returns, signal_config, list_noire_path,
                          dimensions=DEFAULT_SIGNAL_DIMENSIONS,
                          **backtest_options):
     """Teste séparément les dimensions et retourne un lot standardisé."""
+    backtest_options = _ensure_monthly_base_cache(backtest_options)
     if not isinstance(signal_config, dict):
         signal_config = {
             variable: {'higher_is_better': _default_higher_is_better(variable)}
@@ -649,6 +749,24 @@ def test_unitary_signals(screen, returns, signal_config, list_noire_path,
     }
 
     for variable, options in signal_config.items():
+        working_screen, prepared_config = prepare_signals(
+            working_screen, {variable: options}, copy_data=False,
+        )
+        if not prepared_config:
+            continue
+        prepared_variable, prepared_options = next(iter(prepared_config.items()))
+        scoring_options = copy.deepcopy(prepared_options)
+        scoring_options.pop('denominator', None)
+        derived_dimensions = tuple(
+            dimension for dimension in requested_dimensions
+            if dimension != 'level'
+        )
+        working_screen = prepare_signal_derivatives(
+            working_screen,
+            prepared_variable,
+            scoring_options,
+            derived_dimensions,
+        )
         for label, weight_key in dimension_options.items():
             if label not in requested_dimensions:
                 continue
@@ -660,8 +778,18 @@ def test_unitary_signals(screen, returns, signal_config, list_noire_path,
 
             metric = f'Unitary_{label}_{variable}'
             print(f'Test de signal unitaire : {variable} | {label}')
+            internal_options = copy.deepcopy(scoring_options)
+            for dimension in SIGNAL_DIMENSIONS:
+                internal_options[f'weight_{dimension}'] = 0.0
+            internal_options[weight_key] = 1.0
             working_screen = calculate_composite_score(
-                working_screen, metric, {variable: unitary_options},
+                working_screen,
+                metric,
+                {prepared_variable: internal_options},
+                signals_prepared=True,
+                precomputed_derivatives={
+                    prepared_variable: derived_dimensions,
+                },
             )
             result_name = f'{variable} | {label}'
             results[result_name] = run_top_worst_backtest(
@@ -682,6 +810,7 @@ def test_unitary_signals(screen, returns, signal_config, list_noire_path,
 def test_incremental_signals(screen, returns, baseline_config, candidate_config,
                              list_noire_path, **backtest_options):
     """Compare une base et ses candidats dans un lot standardisé."""
+    backtest_options = _ensure_monthly_base_cache(backtest_options)
     baseline_config = _resolve_signal_config(screen, baseline_config)
     results = {}
     baseline_metric = 'Score_Baseline'
@@ -731,6 +860,7 @@ def test_incremental_signals(screen, returns, baseline_config, candidate_config,
 def test_composite_signal(screen, returns, score_col, signal_config,
                           list_noire_path, test_name=None, **backtest_options):
     """Construit un seul composite et retourne un lot standardisé."""
+    backtest_options = _ensure_monthly_base_cache(backtest_options)
     signal_config = _resolve_signal_config(screen, signal_config)
     scored_screen = calculate_composite_score(screen, score_col, signal_config)
     result_name = test_name or score_col
@@ -749,6 +879,7 @@ def test_composite_signal(screen, returns, score_col, signal_config,
 def test_composite_signals(screen, returns, composite_configs, list_noire_path,
                            score_prefix='Score_Composite', **backtest_options):
     """Construit et teste plusieurs recettes composites indépendantes."""
+    backtest_options = _ensure_monthly_base_cache(backtest_options)
     if not isinstance(composite_configs, dict) or not composite_configs:
         raise ValueError('Ajoutez au moins une configuration composite nommée.')
 

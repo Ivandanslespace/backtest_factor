@@ -6,6 +6,8 @@ Date de mesure : 22 juillet 2026
 
 Cette phase réduit le temps d’exécution et le pic de mémoire d’un backtest complet, sans modifier les positions ni les résultats financiers. Elle complète la première phase, qui avait déjà rendu les résultats légers, libéré les builders après chaque test et supprimé les scores `Unitary_*` temporaires.
 
+Une seconde passe, mesurée le même jour, optimise spécifiquement les campagnes comportant plusieurs variables et plusieurs horizons. Elle regroupe la création des dérivées, conserve une base mensuelle commune entre les signaux et compacte les identifiants répétés.
+
 Les optimisations portent sur six points :
 
 1. charger uniquement la période utile avec `load_backtest_data(..., start_date, lookback_periods=12)` ;
@@ -162,14 +164,67 @@ Une future version, activée par une option distincte afin de ne pas casser l’
 6. départager les égalités de manière stable avec une clé secondaire documentée, par exemple capitalisation puis ISIN ;
 7. exporter les diagnostics de couverture, quotas, égalités et solutions de repli avec les résultats.
 
-## 10. Limites et prochaines optimisations possibles
+## 10. Profilage des variables dérivées
 
-Le coût restant est principalement concentré dans la génération mensuelle des listes et dans certaines opérations pandas historiques encore basées sur des `groupby.apply()` ou des boucles de dates.
+Le profilage séparé utilise dix variables réelles, les treize dimensions `level`, `pct_N`, `diff_N` et `rank_diff_N`, ainsi que les quatre horizons 1, 3, 6 et 12. La fenêtre contrôlée commence le 1er juillet 2025 et contient 130 072 lignes. Elle produit 120 colonnes dérivées conservées dans `screen`.
+
+Avant cette passe, chaque dimension dérivée reconstruisait et triait sa propre table. Une variable demandant douze dérivées déclenchait donc douze tris. La nouvelle fonction prépare la valeur brute et le rang une fois, trie une seule fois par ISIN et date, puis génère tous les horizons à partir de cette table ordonnée.
+
+| Mesure profilée | Avant | Après | Gain |
+|---|---:|---:|---:|
+| Temps total | 41,400 s | 16,445 s | **60,3 %** |
+| Nombre de tris | 120 | 10 | **91,7 %** |
+| Pic additionnel | 383,1 Mio | 383,1 Mio | stable |
+| Mémoire retenue | 139,1 Mio | 134,5 Mio | 3,3 % |
+
+Le pic reste stable parce que les 120 colonnes finales doivent volontairement rester disponibles dans `screen`. Le gain porte donc surtout sur les calculs et les tables temporaires. Les 130 colonnes de sortie, comprenant les dix niveaux bruts et les 120 dérivées, ont été comparées avec `check_exact=True` : elles sont strictement identiques à la référence.
+
+## 11. Base mensuelle commune entre les signaux
+
+`monthly_base_cache` conserve, pour chaque date et pour un univers de backtest donné, uniquement les colonnes techniques déjà préparées : date, secteur, poids du benchmark et capitalisation. Le score courant est rattaché à cette base au moment du test. Top et Worst, puis les signaux suivants, réutilisent ainsi la même préparation mensuelle.
+
+Le cache est lié à l’identité de `screen` et se vide automatiquement si un autre objet est fourni. Une valeur `None` le désactive explicitement. Dans le notebook, un dictionnaire partagé dans `RUN_OPTIONS` permet de le conserver entre les appels unitaires, incrémentaux et composites.
+
+Une première version conservait accidentellement les catégories ISIN globales dans chaque table mensuelle et occupait 361,1 Mio. Le cache final utilise un index ISIN local et ne conserve pas SEDOL, qui n’intervient pas dans la sélection mensuelle. Pour 198 mois, il n’occupe plus que **9,5 Mio**, soit une réduction de **97,4 %** par rapport à cette version intermédiaire.
+
+Sur le test réel complet, le premier signal construit le cache en 11,52 s. Le second signal, exécuté avec le même univers et les mêmes options, le réutilise en 10,92 s, soit un gain de 5,2 %. Le gain global est volontairement limité : après les optimisations précédentes, le calcul quotidien des performances et des métriques constitue désormais la majeure partie du temps d’un signal.
+
+## 12. Types compacts pour les identifiants et secteurs
+
+`load_backtest_data(..., compact_dtypes=True)` est activé par défaut. Il utilise :
+
+- un `CategoricalIndex` pour ISIN ;
+- le type `category` pour SEDOL et la région ;
+- `Int8` nullable pour les codes de supersecteur et d’industrie lorsqu’ils sont entiers et compatibles ;
+- les types numériques d’origine pour les variables financières et les rendements, afin de ne perdre aucune précision.
+
+Sur le screen projeté de 2 255 832 lignes et sept colonnes, la mémoire pandas mesurée passe de 485,7 Mio à **72,8 Mio**, soit une baisse de **85,0 %**. Le RSS réellement retenu par l’étape de chargement passe de 555,4 Mio lors de la mesure précédente à 356,8 Mio dans la nouvelle mesure. Le temps de lecture peut légèrement augmenter à cause de la conversion des catégories ; ce coût est payé une seule fois et bénéficie ensuite à toute la campagne.
+
+## 13. Mesure complète et équivalence de la nouvelle passe
+
+La mesure complète conserve le scénario de la section 6. Les résultats suivants comparent la passe précédente, déjà optimisée, à la présente passe :
+
+| Étape | Passe précédente | Nouvelle passe | Évolution |
+|---|---:|---:|---:|
+| Chargement | 0,791 s | 1,338 s | conversion compacte incluse |
+| Pic additionnel du chargement | 616,8 Mio | 535,4 Mio | **-13,2 %** |
+| Benchmark | 5,530 s | 3,140 s | **-43,2 %** |
+| Pic additionnel du benchmark | 1 011,6 Mio | 811,8 Mio | **-19,8 %** |
+| Premier signal complet | 36,647 s | 11,520 s | **-68,6 %** |
+| Pic additionnel du premier signal | 616,0 Mio | 487,9 Mio | **-20,8 %** |
+| Signal suivant avec cache | — | 10,918 s | base mensuelle réutilisée |
+
+Les temps isolés restent sensibles au cache disque et à la charge de la machine. Les mesures structurelles les plus fiables sont la réduction du nombre de tris, la taille pandas du screen et la taille du cache mensuel.
+
+Après ces modifications, le contrôle sur l’historique réel complet reste exact pour les performances, les positions Top et Worst, les ratios, les métriques classiques, les métriques par période et tous les scalaires du score robuste. La suite automatisée contient désormais 22 tests et couvre explicitement le tri unique, les types compacts et la réutilisation de la base mensuelle.
+
+## 14. Limites et prochaines optimisations possibles
+
+Le coût restant est principalement concentré dans le calcul quotidien répété pour chaque signal et dans certaines opérations pandas historiques encore basées sur `groupby.apply()` ou sur des boucles de dates.
 
 Les prochaines pistes, à traiter avec le même protocole d’équivalence, sont :
 
-1. remplacer les derniers `groupby.apply()` de sélection/pondération par des opérations groupées plus directes ;
-2. mettre en cache les préparations communes entre plusieurs signaux utilisant exactement le même univers et la même date ;
-3. utiliser des types plus compacts pour les identifiants et secteurs lorsque le parquet les permet ;
-4. profiler séparément la création des variables dérivées sur les campagnes de 10 à 15 variables ;
-5. ajouter un benchmark automatisé non bloquant afin de suivre les régressions de temps et de mémoire sans rendre les tests fonctionnels instables.
+1. remplacer les derniers `groupby.apply()` de sélection et de pondération par des opérations groupées plus directes ;
+2. mutualiser, lorsque cela est mathématiquement possible, les étapes quotidiennes communes à plusieurs portefeuilles ;
+3. ajouter un benchmark automatisé non bloquant afin de suivre les régressions de temps et de mémoire sans rendre les tests fonctionnels instables ;
+4. étudier un cache persistant optionnel uniquement si les campagnes traversant plusieurs redémarrages de kernel le justifient.

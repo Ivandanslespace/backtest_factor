@@ -130,6 +130,14 @@ class TestChargementDonnees(unittest.TestCase):
         self.assertNotIn('Colonne inutile', loaded_screen.columns)
         self.assertEqual(list(loaded_returns.columns), ['AAA-R'])
         self.assertEqual(loaded_returns.index.min(), pd.Timestamp('2024-01-02'))
+        self.assertIsInstance(
+            loaded_screen['Company SEDOL'].dtype, pd.CategoricalDtype,
+        )
+        self.assertIsInstance(
+            loaded_screen['Exchange Country Region'].dtype,
+            pd.CategoricalDtype,
+        )
+        self.assertEqual(str(loaded_screen[' Benchmark ICB Supersector '].dtype), 'Int8')
 
     def test_lookback_negatif_est_refuse(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -185,6 +193,24 @@ class TestConfigurationSignaux(unittest.TestCase):
         self.assertIn('Revenue 5Y CAGR__pct_1', batch['screen'].columns)
         self.assertIn('Revenue 5Y CAGR__diff_1', batch['screen'].columns)
         self.assertIn('Revenue 5Y CAGR__rank_diff_1', batch['screen'].columns)
+
+    def test_plusieurs_horizons_partagent_un_seul_tri(self):
+        screen = _screen_minimal()
+        options = signal_options(pct_1=1.0, diff_3=1.0, rank_diff_1=1.0)
+        original_sort_values = pd.DataFrame.sort_values
+        with patch.object(
+            pd.DataFrame,
+            'sort_values',
+            autospec=True,
+            side_effect=original_sort_values,
+        ) as sort_values:
+            result = func.calculate_composite_score(
+                screen, 'Score', {'Revenue 5Y CAGR': options},
+            )
+
+        self.assertEqual(sort_values.call_count, 1)
+        for dimension in ('pct_1', 'diff_3', 'rank_diff_1'):
+            self.assertIn(f'Revenue 5Y CAGR__{dimension}', result.columns)
 
     def test_generation_de_toutes_les_dimensions_unitaires(self):
         dimensions = make_signal_dimensions(periods=(1, 3, 6, 12))
@@ -504,6 +530,56 @@ class TestOptimisationsMemoire(unittest.TestCase):
         call.assert_not_called()
         self.assertFalse(top.sec_list_historical.empty)
         self.assertFalse(worst.sec_list_historical.empty)
+
+    def test_deux_signaux_reutilisent_la_meme_base_mensuelle(self):
+        screen, returns, benchmark = _deterministic_backtest_data()
+        screen['Signal 2'] = screen['Signal']
+        cache = {}
+        original_polyfit = np.polyfit
+        with (
+            warnings.catch_warnings(),
+            patch('tqdm.tqdm', new=lambda values, **kwargs: values),
+            patch(
+                'BacktestEngine.np.polyfit', side_effect=original_polyfit,
+            ) as polyfit,
+        ):
+            warnings.simplefilter('ignore')
+            benchmark_performance = func.calculate_benchmark_performance(
+                screen, returns, bench=benchmark, start_date='2024-01-01',
+            )
+            first = func.run_top_worst_backtest(
+                screen, returns, 'Signal', None,
+                bench=benchmark, bench_perf=benchmark_performance,
+                start_date='2024-01-01', period_breakpoints=[],
+                show_plot=False, build_figure=False,
+                monthly_base_cache=cache,
+            )
+            first_call_count = polyfit.call_count
+            cached_frames = [
+                value['df'] for key, value in cache.items()
+                if key != '_source_id'
+            ]
+            second = func.run_top_worst_backtest(
+                screen, returns, 'Signal 2', None,
+                bench=benchmark, bench_perf=benchmark_performance,
+                start_date='2024-01-01', period_breakpoints=[],
+                show_plot=False, build_figure=False,
+                monthly_base_cache=cache,
+            )
+
+        self.assertGreater(first_call_count, 0)
+        self.assertEqual(polyfit.call_count, first_call_count)
+        self.assertTrue(cached_frames)
+        self.assertTrue(all(
+            'Company SEDOL' not in frame.columns for frame in cached_frames
+        ))
+        self.assertTrue(all(
+            not isinstance(frame.index, pd.CategoricalIndex)
+            for frame in cached_frames
+        ))
+        pd.testing.assert_frame_equal(
+            first['performance'], second['performance'], check_exact=True,
+        )
 
 
 class TestReconstructionPeriodes(unittest.TestCase):

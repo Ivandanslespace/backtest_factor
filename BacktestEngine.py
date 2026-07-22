@@ -207,7 +207,8 @@ class PtfBuilder:
                 cap_weight_threshold=None,
                 score_pivot_esg=None,    # score_pivot_esg = "INDEX MSCI WORLD_vs_1330696"
                 score_pivot_esg_path=r"\\groupe-ufg.com\commun\Public\DIRR\Data\riskindics\notes pivots",
-                bench_perf=None):
+                bench_perf=None,
+                monthly_base_cache=None):
         """
         initialisation des paramètres de la classe 
 
@@ -267,6 +268,7 @@ class PtfBuilder:
         self.cap_weight_threshold = cap_weight_threshold
         self.score_pivot_esg = score_pivot_esg
         self.score_pivot_esg_path = score_pivot_esg_path
+        self.monthly_base_cache = monthly_base_cache
 
         if type(screen) not in [str,type(pd.DataFrame())]:
             print("screen must be string or DataFrame")
@@ -773,25 +775,77 @@ class PtfBuilder:
         
         return selected_titles
 
+    def _monthly_base_cache_key(self, date):
+        """Construit une clé sûre pour les préparations mensuelles réutilisables."""
+        if self.monthly_base_cache is None:
+            return None
+        if not isinstance(self.reco_secto, list):
+            return None
+        if self.metrics == 'Multi Avg Percentile':
+            return None
+        return (
+            pd.Timestamp(date), self.bench, self.ponderation,
+            float(self.cut_mkt_cap), self.weight_neutral,
+            tuple(self.reco_secto), float(self.percentile),
+        )
+
+    def _preparation_from_monthly_base(self, monthly_base, screen,
+                                       list_score_col):
+        """Ajoute uniquement les scores courants à une base mensuelle compacte."""
+        score_source = screen
+        if score_source.index.name != 'ISIN' and 'ISIN' in score_source.columns:
+            score_source = score_source.set_index('ISIN')
+        if score_source.index.duplicated().any():
+            score_source = score_source.loc[
+                ~score_source.index.duplicated(keep='first')
+            ]
+        score_values = score_source.loc[:, list_score_col].reindex(
+            monthly_base['df'].index,
+        )
+        df = monthly_base['df'].copy(deep=True)
+        df.loc[:, list_score_col] = score_values.to_numpy()
+        df.loc[
+            ~monthly_base['eligible_market_cap'], list_score_col,
+        ] = np.nan
+        return {
+            'df': df,
+            'date': monthly_base['date'],
+            'list_score_col': list_score_col,
+            'nb_securities': monthly_base['nb_securities'],
+            'weight_secto_bench': monthly_base['weight_secto_bench'],
+        }
+
     def sec_list_spot(self,screen_agg_monthly=None):
         """
         Generate Best Scored Sec List for 1 Month, According to the Metrics Chosen
         """
 
         if isinstance(screen_agg_monthly, pd.DataFrame):
-            screen=copy.deepcopy(screen_agg_monthly)
+            source_screen = screen_agg_monthly
         elif screen_agg_monthly==None: # If single month dataframe is not defined, then use the last month data to generate ptf
-            screen = self.screen[self.screen['Date'] == self.screen['Date'].max()] 
+            source_screen = self.screen[
+                self.screen['Date'] == self.screen['Date'].max()
+            ]
 
-        
         if type(self.metrics)==str:
             list_score_col = [self.metrics]
         else:
             list_score_col = self.metrics
 
-
         ################ use only the last month's screen (production mode) ################ 
-        date = pd.to_datetime(screen['Date'].max())
+        raw_date = pd.to_datetime(source_screen['Date'].max())
+        cache_key = self._monthly_base_cache_key(raw_date)
+        if cache_key is not None and cache_key in self.monthly_base_cache:
+            preparation = self._preparation_from_monthly_base(
+                self.monthly_base_cache[cache_key],
+                source_screen,
+                list_score_col,
+            )
+            self._last_monthly_preparation = preparation
+            return self._finalize_sec_list_spot(preparation)
+
+        screen=copy.deepcopy(source_screen)
+        date = raw_date
         # screen=screen[screen['Date']==date]
 
         if screen.index.duplicated().any():
@@ -838,7 +892,10 @@ class PtfBuilder:
         func = np.poly1d(fit)
         df.loc[pd.isna(df['Benchmark Market Value Millions in EUR ']),'Benchmark Market Value Millions in EUR '] = func(df.loc[pd.isna(df['Benchmark Market Value Millions in EUR ']),'Weight in ' + self.bench])
         # Market cut filtrage
-        df.loc[df['Benchmark Market Value Millions in EUR '] <= self.cut_mkt_cap, list_score_col] = np.nan
+        eligible_market_cap = (
+            df['Benchmark Market Value Millions in EUR '] > self.cut_mkt_cap
+        ).to_numpy()
+        df.loc[~eligible_market_cap, list_score_col] = np.nan
         
         df = df.copy()
         df.loc[:, 'Date'] = date
@@ -866,6 +923,23 @@ class PtfBuilder:
             'nb_securities': nb_securities,
             'weight_secto_bench': weight_secto_bench,
         }
+        if cache_key is not None:
+            compact_base = df.drop(
+                columns=[*list_score_col, 'Company SEDOL'],
+                errors='ignore',
+            ).copy(deep=True)
+            if isinstance(compact_base.index, pd.CategoricalIndex):
+                compact_base.index = pd.Index(
+                    compact_base.index.astype(object),
+                    name=compact_base.index.name,
+                )
+            self.monthly_base_cache[cache_key] = {
+                'df': compact_base,
+                'date': date,
+                'nb_securities': nb_securities,
+                'weight_secto_bench': weight_secto_bench.copy(),
+                'eligible_market_cap': eligible_market_cap.copy(),
+            }
         self._last_monthly_preparation = preparation
         return self._finalize_sec_list_spot(preparation)
 
@@ -931,11 +1005,15 @@ class PtfBuilder:
 
             ##### Ajustement Secteur Neutre
             temp_df = pd.DataFrame(columns = columns)
-            temp_df['ISIN'] = df_top.index
+            temp_df['ISIN'] = np.asarray(df_top.index, dtype=object)
             if self.weight_neutral == "ICB 19":
-                temp_df['Secto'] = df_top[' Benchmark ICB Supersector '].values
+                temp_df['Secto'] = df_top[
+                    ' Benchmark ICB Supersector '
+                ].astype(float).to_numpy()
             elif self.weight_neutral == "ICB 11":
-                temp_df['Secto'] = df_top[' Benchmark ICB Industry '].values
+                temp_df['Secto'] = df_top[
+                    ' Benchmark ICB Industry '
+                ].astype(float).to_numpy()
             temp_df['Weight'] = df_top['Benchmark Market Value Millions in EUR '].values
 
             temp_df['Score'] = df_top[list_score_col[i]].values
@@ -1442,7 +1520,9 @@ class PtfBuilder:
         #filtrer pour avoir la période du portefeuille
         df_rebal.reset_index(inplace=True)
     
-        df_rebal = df_rebal[df_rebal[col_id].isin(df_returns.columns)] #SUPPRESSION DES TITRES QUI NE SONT PAS DS LE RETURN
+        df_rebal = df_rebal.loc[
+            df_rebal[col_id].isin(df_returns.columns)
+        ].copy()  # SUPPRESSION DES TITRES ABSENTS DES RENDEMENTS
         df_rebal.set_index(col_date,inplace=True)
 
         # Normalisation
@@ -1656,7 +1736,9 @@ class PtfBuilder:
         # For each asset (grouped by col_id), shift the normalized weight W_rebased down by one row, i.e., retrieve the normalized weight from the previous day.
         # This is typically done to calculate the daily contribution of each asset by multiplying the previous day's weight BY the current day's return, 
         # thereby determining the asset's contribution to the portfolio's daily return.
-        portfolio_tet['W_rebased_shift1'] = portfolio_tet.groupby(col_id)['W_rebased'].shift(1)
+        portfolio_tet['W_rebased_shift1'] = portfolio_tet.groupby(
+            col_id, observed=False,
+        )['W_rebased'].shift(1)
         
         # Calculate the contribution of each asset: multiply the previous day's normalized weight by the current day's return.
         # Then, sum the contributions of all assets by date to obtain the total return contribution of the portfolio for each day.
