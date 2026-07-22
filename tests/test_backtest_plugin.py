@@ -789,6 +789,120 @@ class TestParallelisationSignaux(unittest.TestCase):
                 )
 
 
+class TestExportCumulatif(unittest.TestCase):
+    """Vérifie l'ajout et le remplacement des tests dans un export nommé."""
+
+    @staticmethod
+    def _resultat(test_type, test_name, raw_variables, score):
+        dates = pd.to_datetime(['2024-01-01', '2024-01-02'])
+        components = [
+            {
+                'role': test_type,
+                'raw_variable': variable,
+                'dimension': 'level',
+                'weight': 1.0,
+                'higher_is_better': True,
+            }
+            for variable in raw_variables
+        ]
+        return {
+            'figure': None,
+            'metadata': {
+                'test_type': test_type,
+                'test_name': test_name,
+                'metric': test_name,
+                'components': components,
+            },
+            'performance': pd.DataFrame({
+                'Top': [100.0, 100.0 * (1 + score)],
+                'Worst': [100.0, 99.0],
+                'Bench': [100.0, 100.5],
+            }, index=dates),
+            'ratios': pd.DataFrame({'Top/Bench': [1.0, 1 + score]}, index=dates),
+            'top_holdings': pd.DataFrame({
+                'Date': dates, 'ISIN': ['A', 'A'], 'Weight': [1.0, 1.0],
+            }),
+            'worst_holdings': pd.DataFrame({
+                'Date': dates, 'ISIN': ['B', 'B'], 'Weight': [1.0, 1.0],
+            }),
+            'raw_variables': raw_variables,
+            'raw_variable_weights': func.summarize_component_weights(components),
+            'classic_metrics': {'Top': {'total_return': score}},
+            'period_metrics': pd.DataFrame([{
+                'period_id': 'since_2024',
+                'period_label': 'Depuis 2024',
+                'active_cagr': score,
+                'top_worst_cagr': score,
+                'top_sharpe_ratio': score,
+            }]),
+            'robust_score': score,
+            'top_bench_ratio': score,
+            'top_worst_ratio': score,
+            'observation_count': 2,
+        }
+
+    def test_meme_nom_ajoute_puis_remplace_par_test_path(self):
+        unitary_path = 'unitary / Revenue | level'
+        composite_path = 'composite / Composite A'
+        with tempfile.TemporaryDirectory() as directory:
+            unitary = {
+                'unitary': {
+                    'Revenue | level': self._resultat(
+                        'unitary', 'Revenue | level', ['Revenue'], 0.1,
+                    ),
+                },
+            }
+            composite = {
+                'composite': {
+                    'Composite A': self._resultat(
+                        'composite', 'Composite A', ['Revenue', 'FCF'], 0.2,
+                    ),
+                },
+            }
+            func.export_backtest_results(
+                unitary, directory, export_name='recherche',
+                export_html=False, export_png=False,
+            )
+            func.export_backtest_results(
+                composite, directory, export_name='recherche',
+                export_html=False, export_png=False,
+            )
+            unitary['unitary']['Revenue | level'] = self._resultat(
+                'unitary', 'Revenue | level', ['Revenue'], 0.9,
+            )
+            bundle = func.export_backtest_results(
+                unitary, directory, export_name='recherche',
+                export_html=False, export_png=False,
+            )
+            export_dir = Path(directory) / 'recherche'
+            sources = func._load_saved_performances(export_dir)
+            analysis = func.reconstruct_backtest_analysis(export_dir=export_dir)
+
+        self.assertSetEqual(
+            set(bundle['summary']['test_path']),
+            {unitary_path, composite_path},
+        )
+        self.assertEqual(bundle['summary']['test_path'].nunique(), 2)
+        latest_score = bundle['summary'].set_index('test_path').loc[
+            unitary_path, 'robust_score'
+        ]
+        self.assertAlmostEqual(latest_score, 0.9)
+        self.assertEqual(
+            bundle['composition'].groupby('test_path').size().to_dict(),
+            {unitary_path: 1, composite_path: 2},
+        )
+        self.assertEqual(bundle['classic_metrics']['test_path'].nunique(), 2)
+        self.assertEqual(bundle['period_metrics']['test_path'].nunique(), 2)
+        self.assertEqual(bundle['metrics_by_period']['test_path'].nunique(), 2)
+        self.assertEqual(len(bundle['registry']), 2)
+        self.assertSetEqual(set(sources), {unitary_path, composite_path})
+        self.assertAlmostEqual(
+            sources[unitary_path]['performance']['Top'].iloc[-1], 190.0,
+        )
+        self.assertEqual(analysis['summary']['test_path'].nunique(), 2)
+        self.assertEqual(analysis['metrics_by_period']['test_path'].nunique(), 2)
+
+
 class TestReconstructionPeriodes(unittest.TestCase):
     """Vérifie la réunion de la période totale et des sous-périodes."""
 

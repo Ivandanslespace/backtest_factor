@@ -1245,9 +1245,21 @@ def compare_backtest_results(results):
             for metric in PERIOD_SUMMARY_METRICS:
                 row[f'{prefix}_{metric}'] = period_row.get(metric)
         rows.append(row)
-    summary = pd.DataFrame(rows)
+    return _rank_backtest_summary(pd.DataFrame(rows))
+
+
+def _rank_backtest_summary(summary):
+    """Recalcule les classements d'une synthèse éventuellement fusionnée."""
     if summary.empty:
         return summary
+    summary = summary.drop(
+        columns=[
+            column for column in summary.columns
+            if column in ('robust_rank_global', 'robust_rank_within_type')
+            or column.endswith('_delta_vs_baseline')
+        ],
+        errors='ignore',
+    ).copy()
     summary['robust_rank_global'] = summary['robust_score'].rank(
         ascending=False, method='min', na_option='bottom',
     )
@@ -1268,6 +1280,20 @@ def compare_backtest_results(results):
                 summary.loc[candidate_mask, metric] - baseline[metric]
             )
     return summary.sort_values(['test_type', 'robust_rank_within_type', 'test_name'])
+
+
+def _merge_export_table(path, current, replaced_paths):
+    """Fusionne une table exportée en remplaçant intégralement les tests relancés."""
+    path = Path(path)
+    if not path.exists():
+        return current.reset_index(drop=True)
+    previous = pd.read_csv(path)
+    if 'test_path' not in previous.columns:
+        return current.reset_index(drop=True)
+    previous = previous.loc[
+        ~previous['test_path'].astype(str).isin(replaced_paths)
+    ]
+    return pd.concat([previous, current], ignore_index=True, sort=False)
 
 
 def _safe_filename(value):
@@ -1338,7 +1364,7 @@ def _load_saved_performances(export_dir):
                 'origin': str(performance_path),
             }
 
-    if data_dir.exists():
+    if data_dir.exists() and not registry_path.exists():
         for performance_path in sorted(data_dir.glob('*_performance.csv')):
             if performance_path.resolve() in registered_files:
                 continue
@@ -1746,11 +1772,21 @@ def _combine_total_and_period_metrics(summary, period_metrics):
     subperiod_metrics = period_metrics.copy()
     if not subperiod_metrics.empty:
         subperiod_metrics.insert(0, 'scope', 'subperiod')
+    column_order = list(dict.fromkeys([
+        *total_metrics.columns, *subperiod_metrics.columns,
+    ]))
+    available_metrics = [
+        frame.dropna(axis=1, how='all')
+        for frame in (total_metrics, subperiod_metrics)
+        if not frame.empty
+    ]
+    if not available_metrics:
+        return pd.DataFrame(columns=column_order)
     combined = pd.concat(
-        [total_metrics, subperiod_metrics],
+        available_metrics,
         ignore_index=True,
         sort=False,
-    )
+    ).reindex(columns=column_order)
     if combined.empty:
         return combined
     for metric in ('active_cagr', 'top_worst_cagr', 'top_sharpe_ratio'):
@@ -1960,7 +1996,7 @@ def plot_performance_comparison(performance, ratios, benchmark_column='Benchmark
 
 def export_backtest_results(results, output_dir, export_name=None, export_png=True,
                             export_html=True):
-    """Exporte toutes les données avant les figures HTML et PNG optionnelles."""
+    """Exporte puis fusionne les tests d'un même nom avant les figures optionnelles."""
     export_name = export_name or datetime.now().strftime('backtest_export_%Y%m%d_%H%M%S')
     export_dir = Path(output_dir) / _safe_filename(export_name)
     figures_dir = export_dir / 'figures'
@@ -1971,6 +2007,7 @@ def export_backtest_results(results, output_dir, export_name=None, export_png=Tr
 
     flattened = list(_iter_backtest_results(results))
     summary = compare_backtest_results(results)
+    replaced_paths = {test_path for test_path, _ in flattened}
     composition_rows = []
     classic_metric_rows = []
     period_metric_rows = []
@@ -2062,10 +2099,34 @@ def export_backtest_results(results, output_dir, export_name=None, export_png=Tr
             },
         })
 
-    composition = pd.DataFrame(composition_rows)
-    classic_metrics = pd.DataFrame(classic_metric_rows)
-    period_metrics = pd.DataFrame(period_metric_rows)
+    summary = _merge_export_table(
+        export_dir / 'backtest_summary.csv', summary, replaced_paths,
+    )
+    summary = _rank_backtest_summary(summary)
+    composition = _merge_export_table(
+        export_dir / 'signal_composition.csv',
+        pd.DataFrame(composition_rows),
+        replaced_paths,
+    )
+    classic_metrics = _merge_export_table(
+        export_dir / 'classic_metrics.csv',
+        pd.DataFrame(classic_metric_rows),
+        replaced_paths,
+    )
+    period_metrics = _merge_export_table(
+        export_dir / 'period_metrics.csv',
+        pd.DataFrame(period_metric_rows),
+        replaced_paths,
+    )
     if not period_metrics.empty:
+        period_metrics = period_metrics.drop(
+            columns=[
+                column for column in period_metrics.columns
+                if column.endswith('_rank_global')
+                or column.endswith('_rank_within_type')
+            ],
+            errors='ignore',
+        )
         ranking_metrics = ('active_cagr', 'top_worst_cagr', 'top_sharpe_ratio')
         for metric in ranking_metrics:
             if metric not in period_metrics.columns:
@@ -2082,7 +2143,19 @@ def export_backtest_results(results, output_dir, export_name=None, export_png=Tr
     classic_metrics.to_csv(export_dir / 'classic_metrics.csv', index=False)
     period_metrics.to_csv(export_dir / 'period_metrics.csv', index=False)
     metrics_by_period.to_csv(export_dir / 'metrics_by_period.csv', index=False)
-    with (export_dir / 'backtest_registry.json').open('w', encoding='utf-8') as registry_file:
+    registry_path = export_dir / 'backtest_registry.json'
+    registry_by_path = {}
+    if registry_path.exists():
+        with registry_path.open('r', encoding='utf-8') as registry_file:
+            previous_registry = json.load(registry_file)
+        registry_by_path.update({
+            entry.get('test_path'): entry
+            for entry in previous_registry
+            if entry.get('test_path')
+        })
+    registry_by_path.update({entry['test_path']: entry for entry in registry})
+    registry = list(registry_by_path.values())
+    with registry_path.open('w', encoding='utf-8') as registry_file:
         json.dump(registry, registry_file, ensure_ascii=False, indent=2, default=str)
 
     print(f'Données exportées avant les figures : {export_dir}')
