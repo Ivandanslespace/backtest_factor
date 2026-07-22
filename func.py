@@ -1381,6 +1381,7 @@ def _load_saved_performances(export_dir):
                     entry.get('raw_variable_weights')
                     or summarize_component_weights(components)
                 ),
+                'robust_score': entry.get('metrics', {}).get('robust_score'),
                 'performance': _read_performance_csv(performance_path),
                 'origin': str(performance_path),
             }
@@ -1421,6 +1422,7 @@ def _collect_performance_sources(results=None, export_dir=None):
                     result.get('raw_variable_weights')
                     or summarize_component_weights(components)
                 ),
+                'robust_score': result.get('robust_score'),
                 'performance': performance.copy(),
                 'origin': 'mémoire',
             }
@@ -1551,14 +1553,42 @@ def combine_backtest_performances(results=None, export_dir=None, selections=None
     return combined
 
 
-def build_performance_comparison_definitions(results=None, export_dir=None):
-    """Crée automatiquement les sélections et ratios de tous les tests disponibles."""
+def _comparison_test_paths(sources, max_tests):
+    """Retient les meilleurs tests pour garder la comparaison graphique lisible."""
+    if max_tests is None:
+        return list(sources)
+    if not isinstance(max_tests, int) or max_tests < 1:
+        raise ValueError('max_tests doit être un entier positif ou None.')
+
+    def sort_key(item):
+        test_path, source = item
+        robust_score = pd.to_numeric(source.get('robust_score'), errors='coerce')
+        return (
+            pd.isna(robust_score),
+            -float(robust_score) if pd.notna(robust_score) else 0.0,
+            test_path,
+        )
+
+    return [
+        test_path for test_path, _ in sorted(sources.items(), key=sort_key)[:max_tests]
+    ]
+
+
+def build_performance_comparison_definitions(results=None, export_dir=None,
+                                             max_tests=8,
+                                             include_worst_benchmark_ratio=False):
+    """Crée une comparaison lisible des meilleurs tests disponibles.
+
+    Le score de robustesse de la période totale sélectionne au plus ``max_tests``
+    tests. Passez ``None`` pour reproduire une comparaison exhaustive.
+    """
     sources = _collect_performance_sources(results=results, export_dir=export_dir)
     selections = {}
     labels_by_test = {}
     benchmark_selection = None
 
-    for test_path, source in sources.items():
+    for test_path in _comparison_test_paths(sources, max_tests):
+        source = sources[test_path]
         performance = source['performance']
         display_path = _performance_display_path(test_path, source)
         test_labels = {}
@@ -1580,21 +1610,28 @@ def build_performance_comparison_definitions(results=None, export_dir=None):
 
     ratio_definitions = {}
     for test_path, labels in labels_by_test.items():
-        for portfolio in ('Top', 'Worst'):
-            label = labels.get(portfolio)
-            if label:
-                ratio_definitions[f'{label} / Benchmark'] = (label, 'Benchmark')
+        top_label = labels.get('Top')
+        worst_label = labels.get('Worst')
+        if top_label:
+            ratio_definitions[f'{top_label} / Benchmark'] = (top_label, 'Benchmark')
+        if include_worst_benchmark_ratio and worst_label:
+            ratio_definitions[f'{worst_label} / Benchmark'] = (
+                worst_label, 'Benchmark',
+            )
         if {'Top', 'Worst'}.issubset(labels):
-            top_label = labels['Top']
-            worst_label = labels['Worst']
             ratio_definitions[f'{top_label} / Worst'] = (top_label, worst_label)
     return selections, ratio_definitions
 
 
-def prepare_performance_comparison(results=None, export_dir=None, save_path=None):
-    """Prépare toutes les performances, compositions et ratios sans construire de figure."""
+def prepare_performance_comparison(results=None, export_dir=None, save_path=None,
+                                   max_tests=8,
+                                   include_worst_benchmark_ratio=False):
+    """Prépare une comparaison graphique limitée aux tests les plus pertinents."""
     selections, ratio_definitions = build_performance_comparison_definitions(
-        results=results, export_dir=export_dir,
+        results=results,
+        export_dir=export_dir,
+        max_tests=max_tests,
+        include_worst_benchmark_ratio=include_worst_benchmark_ratio,
     )
     performance, composition = combine_backtest_performances(
         results=results,
@@ -2008,12 +2045,23 @@ def _rebase_frame(frame, base_value):
 def plot_performance_comparison(performance, ratios, benchmark_column='Benchmark',
                                 title='Comparaison des performances',
                                 save_path=None, show_plot=True, rebase=True,
-                                period_breakpoints=None):
-    """Trace les performances avec un sélecteur de périodes et un rebasage local."""
+                                period_breakpoints=None,
+                                show_worst_performance=False):
+    """Trace une comparaison compacte avec un sélecteur de périodes."""
     if benchmark_column not in performance.columns:
         raise KeyError(f'Benchmark « {benchmark_column} » absent des performances.')
     performance = performance.sort_index()
     ratios = ratios.sort_index()
+    displayed_performance_columns = [
+        column for column in performance.columns
+        if (
+            column == benchmark_column
+            or show_worst_performance
+            or not (
+                str(column) == 'Worst' or str(column).endswith(' | Worst')
+            )
+        )
+    ]
 
     def displayed_frames(start=None, end=None):
         """Prépare une fenêtre en ramenant chaque série à sa base locale."""
@@ -2022,7 +2070,7 @@ def plot_performance_comparison(performance, ratios, benchmark_column='Benchmark
         if rebase:
             window_performance = _rebase_frame(window_performance, base_value=100.0)
             window_ratios = _rebase_frame(window_ratios, base_value=1.0)
-        return window_performance, window_ratios
+        return window_performance.loc[:, displayed_performance_columns], window_ratios
 
     displayed_performance, displayed_ratios = displayed_frames()
 
@@ -2045,7 +2093,7 @@ def plot_performance_comparison(performance, ratios, benchmark_column='Benchmark
     }
     color_map[benchmark_column] = 'black'
 
-    for column in performance.columns:
+    for column in displayed_performance.columns:
         fig.add_trace(
             go.Scatter(
                 x=performance.index,

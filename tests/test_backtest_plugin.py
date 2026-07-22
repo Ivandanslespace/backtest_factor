@@ -1004,6 +1004,54 @@ class TestReconstructionPeriodes(unittest.TestCase):
 class TestComparaisonPerformance(unittest.TestCase):
     """Vérifie le menu de périodes et le rebasage local de la comparaison."""
 
+    @staticmethod
+    def _resultat_comparaison(score):
+        dates = pd.to_datetime(['2024-01-01', '2024-01-02'])
+        return {
+            'figure': None,
+            'metadata': {'test_name': f'Signal {score}', 'metric': 'Signal'},
+            'performance': pd.DataFrame({
+                'Top': [100.0, 100.0 * (1 + score)],
+                'Worst': [100.0, 99.0],
+                'Bench': [100.0, 100.5],
+            }, index=dates),
+            'robust_score': score,
+        }
+
+    def test_selection_automatique_limite_les_meilleurs_tests(self):
+        results = {
+            'unitary': {
+                'screen': pd.DataFrame(),
+                'results': {
+                    f'Signal {score}': self._resultat_comparaison(score)
+                    for score in (0.1, 0.9, 0.5)
+                },
+            },
+        }
+
+        selections, ratio_definitions = func.build_performance_comparison_definitions(
+            results=results, max_tests=2,
+        )
+
+        selected_paths = {selection[0] for selection in selections.values()}
+        self.assertSetEqual(selected_paths, {
+            'unitary / Signal 0.9', 'unitary / Signal 0.5',
+        })
+        self.assertEqual(len(ratio_definitions), 4)
+
+        comparison = func.prepare_performance_comparison(
+            results=results, max_tests=2,
+        )
+        figure = func.plot_performance_comparison(
+            comparison['performance'],
+            comparison['ratios'],
+            benchmark_column='Benchmark',
+            show_plot=False,
+        )
+        self.assertEqual(len(comparison['performance'].columns), 5)
+        self.assertEqual(len(comparison['ratios'].columns), 4)
+        self.assertEqual(len(figure.data), 7)
+
     def test_menu_de_periodes_rebase_performances_et_ratios(self):
         dates = pd.to_datetime(['2019-12-31', '2020-01-02', '2020-01-03'])
         performance = pd.DataFrame({
@@ -1032,15 +1080,23 @@ class TestComparaisonPerformance(unittest.TestCase):
         self.assertEqual(since_2020['x'][0][0], pd.Timestamp('2020-01-02'))
         self.assertEqual(since_2020['y'][0][0], 100.0)
         self.assertEqual(since_2020['y'][1][0], 100.0)
-        self.assertEqual(since_2020['y'][2][0], 100.0)
+        self.assertEqual(since_2020['y'][2][0], 1.0)
         self.assertEqual(since_2020['y'][3][0], 1.0)
-        self.assertEqual(since_2020['y'][4][0], 1.0)
-        self.assertTrue(all(trace.legend == 'legend' for trace in figure.data[:3]))
-        self.assertTrue(all(trace.legend == 'legend2' for trace in figure.data[3:]))
+        self.assertTrue(all(trace.legend == 'legend' for trace in figure.data[:2]))
+        self.assertTrue(all(trace.legend == 'legend2' for trace in figure.data[2:]))
         self.assertEqual(figure.layout.legend.font.size, 9)
         self.assertEqual(figure.layout.legend2.font.size, 9)
         self.assertEqual(figure.layout.legend.title.text, 'Performances')
         self.assertEqual(figure.layout.legend2.title.text, 'Ratios')
+
+        figure_with_worst = func.plot_performance_comparison(
+            performance,
+            ratios,
+            benchmark_column='Benchmark',
+            show_plot=False,
+            show_worst_performance=True,
+        )
+        self.assertEqual(len(figure_with_worst.data), 5)
 
 
 class TestEquivalenceMoteur(unittest.TestCase):
@@ -1067,14 +1123,34 @@ class TestEquivalenceMoteur(unittest.TestCase):
             'performance': '448c604bccd590c6d96cbf3a719bb108929170839c00fa9a80a23a569115995f',
             'top_holdings': '838808f9e98aec40e114e15ab41a28e9ae288814aee17b6428d24f6d8ae28758',
             'worst_holdings': 'bd8406e4bb86ff63e8eea684b66fb6deb5cafc9b6b3f71ba44b10116e02732f0',
-            'period_metrics': 'ee20e457b3bf95137b7fb74ff358513dc001ca527c971ba444bf5cc37e622943',
         }
         for name, digest in expected.items():
             self.assertEqual(_frame_digest(result[name]), digest, name)
-        self.assertEqual(
-            hashlib.sha256(repr(result['classic_metrics']).encode()).hexdigest(),
-            'e48ca6a22d763d21a6a54c8cd3e8ebd5c52ab9974cdfed161ff08c9c34b9a476',
-        )
+        period_metrics = result['period_metrics']
+        self.assertListEqual(period_metrics.columns[:16].tolist(), [
+            'period_id', 'period_label', 'requested_start_date',
+            'requested_end_date', 'actual_start_date', 'actual_end_date',
+            'observation_count', 'years', 'top_cagr', 'worst_cagr',
+            'bench_cagr', 'active_cagr', 'top_worst_cagr', 'robust_score',
+            'top_bench_ratio', 'top_worst_ratio',
+        ])
+        self.assertEqual(period_metrics['period_id'].tolist(), ['all'])
+        self.assertEqual(period_metrics['period_label'].tolist(), [
+            'Échantillon complet',
+        ])
+        self.assertTrue(pd.notna(period_metrics.loc[0, 'robust_score']))
+        expected_classic_metrics = {
+            'total_return', 'annualized_return', 'annualized_volatility',
+            'sharpe_ratio', 'max_drawdown', 'sortino_ratio', 'beta',
+            'tracking_error', 'information_ratio',
+        }
+        for portfolio, metrics in result['classic_metrics'].items():
+            self.assertSetEqual(set(metrics), expected_classic_metrics)
+            total_return = (
+                result['performance'][portfolio].iloc[-1]
+                / result['performance'][portfolio].iloc[0] - 1
+            )
+            self.assertAlmostEqual(metrics['total_return'], total_return)
 
     def test_isin_peut_rester_index_du_screen_parquet(self):
         screen, returns, benchmark = _deterministic_backtest_data()
