@@ -863,6 +863,9 @@ class TestExportCumulatif(unittest.TestCase):
                 unitary, directory, export_name='recherche',
                 export_html=False, export_png=False,
             )
+            unitary_only_analysis = func.reconstruct_backtest_analysis(
+                export_dir=Path(directory) / 'recherche',
+            )
             func.export_backtest_results(
                 composite, directory, export_name='recherche',
                 export_html=False, export_png=False,
@@ -878,6 +881,10 @@ class TestExportCumulatif(unittest.TestCase):
             sources = func._load_saved_performances(export_dir)
             analysis = func.reconstruct_backtest_analysis(export_dir=export_dir)
 
+        self.assertEqual(
+            unitary_only_analysis['summary']['test_path'].tolist(),
+            [unitary_path],
+        )
         self.assertSetEqual(
             set(bundle['summary']['test_path']),
             {unitary_path, composite_path},
