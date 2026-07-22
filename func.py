@@ -2115,7 +2115,6 @@ def plot_performance_comparison(performance, ratios, benchmark_column='Benchmark
             yanchor='top',
             title=dict(text='Performances', font=dict(size=10)),
             font=dict(size=9),
-            maxheight=0.42,
         ),
         legend2=dict(
             orientation='v',
@@ -2125,7 +2124,6 @@ def plot_performance_comparison(performance, ratios, benchmark_column='Benchmark
             yanchor='top',
             title=dict(text='Ratios', font=dict(size=10)),
             font=dict(size=9),
-            maxheight=0.42,
         ),
         margin=dict(r=420, t=100),
     )
