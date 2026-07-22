@@ -2053,6 +2053,7 @@ def plot_performance_comparison(performance, ratios, benchmark_column='Benchmark
                 mode='lines',
                 name=column,
                 legendgroup=column,
+                legend='legend',
                 line=dict(
                     color=color_map[column],
                     width=3 if column == benchmark_column else 2,
@@ -2076,6 +2077,7 @@ def plot_performance_comparison(performance, ratios, benchmark_column='Benchmark
                 mode='lines',
                 name=ratio_name,
                 legendgroup=ratio_name,
+                legend='legend2',
                 line=dict(
                     color=color_map.get(
                         numerator,
@@ -2111,6 +2113,19 @@ def plot_performance_comparison(performance, ratios, benchmark_column='Benchmark
             xanchor='left',
             y=1,
             yanchor='top',
+            title=dict(text='Performances', font=dict(size=10)),
+            font=dict(size=9),
+            maxheight=0.42,
+        ),
+        legend2=dict(
+            orientation='v',
+            x=1.01,
+            xanchor='left',
+            y=0.47,
+            yanchor='top',
+            title=dict(text='Ratios', font=dict(size=10)),
+            font=dict(size=9),
+            maxheight=0.42,
         ),
         margin=dict(r=420, t=100),
     )

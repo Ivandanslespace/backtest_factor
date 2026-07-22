@@ -1035,6 +1035,12 @@ class TestComparaisonPerformance(unittest.TestCase):
         self.assertEqual(since_2020['y'][2][0], 100.0)
         self.assertEqual(since_2020['y'][3][0], 1.0)
         self.assertEqual(since_2020['y'][4][0], 1.0)
+        self.assertTrue(all(trace.legend == 'legend' for trace in figure.data[:3]))
+        self.assertTrue(all(trace.legend == 'legend2' for trace in figure.data[3:]))
+        self.assertEqual(figure.layout.legend.font.size, 9)
+        self.assertEqual(figure.layout.legend2.font.size, 9)
+        self.assertEqual(figure.layout.legend.title.text, 'Performances')
+        self.assertEqual(figure.layout.legend2.title.text, 'Ratios')
 
 
 class TestEquivalenceMoteur(unittest.TestCase):
