@@ -218,7 +218,221 @@ Les temps isolés restent sensibles au cache disque et à la charge de la machin
 
 Après ces modifications, le contrôle sur l’historique réel complet reste exact pour les performances, les positions Top et Worst, les ratios, les métriques classiques, les métriques par période et tous les scalaires du score robuste. La suite automatisée contient désormais 22 tests et couvre explicitement le tri unique, les types compacts et la réutilisation de la base mensuelle.
 
-## 14. Limites et prochaines optimisations possibles
+## 14. Comparaison du code avant et après
+
+Les extraits ci-dessous sont volontairement réduits aux instructions qui portent le coût principal. `...` indique uniquement du code inchangé ou non pertinent pour la comparaison. La version « avant » correspond au snapshot antérieur aux optimisations du moteur ; la version « après » correspond au commit `f3447f0`.
+
+### 14.1 Chargement projeté, filtré et compacté
+
+Avant, les colonnes utiles étaient déjà projetées, mais tout l’historique du screen était chargé et les identifiants répétés restaient de type `object` :
+
+```python
+screen = pd.read_parquet(
+    screen_path,
+    columns=requested_columns,
+)
+returns = pd.read_parquet(
+    returns_path,
+    columns=return_columns,
+)
+```
+
+Après, le filtre parquet conserve uniquement la période utile avec son lookback, puis les identifiants et secteurs sont compactés :
+
+```python
+screen_start_date = resolved_start_date - pd.DateOffset(
+    months=int(lookback_periods),
+)
+screen_filters = [('Date', '>=', screen_start_date.to_pydatetime())]
+
+screen = pd.read_parquet(
+    screen_path,
+    columns=requested_columns,
+    filters=screen_filters,
+)
+if compact_dtypes:
+    screen = compact_screen_dtypes(screen)
+
+returns = pd.read_parquet(
+    returns_path,
+    columns=return_columns,
+)
+returns = returns.loc[returns.index >= resolved_start_date]
+```
+
+Effet mesuré : 34,7 % de lignes screen en moins et une taille pandas du screen projeté réduite de 485,7 Mio à 72,8 Mio.
+
+### 14.2 Partage des entrées et préparation mensuelle réutilisable
+
+Avant, chaque builder copiait intégralement les deux grandes tables, puis chaque appel mensuel recopiait encore son screen :
+
+```python
+self.screen = copy.deepcopy(screen)
+self.returns = copy.deepcopy(returns)
+
+screen = copy.deepcopy(screen_agg_monthly)
+```
+
+Après, les builders partagent les entrées en lecture seule. La base mensuelle technique est calculée une fois et le score du signal courant est rattaché lors de la lecture du cache :
+
+```python
+self.screen = screen
+self.returns = returns
+self.monthly_base_cache = monthly_base_cache
+
+cache_key = self._monthly_base_cache_key(raw_date)
+if cache_key is not None and cache_key in self.monthly_base_cache:
+    preparation = self._preparation_from_monthly_base(
+        self.monthly_base_cache[cache_key],
+        source_screen,
+        list_score_col,
+    )
+    return self._finalize_sec_list_spot(preparation)
+```
+
+Effet mesuré : le cache de 198 mois occupe 9,5 Mio. Un signal suivant sur le même univers passe de 11,52 s, coût du premier signal incluant la construction du cache, à 10,92 s.
+
+### 14.3 Un seul tri par variable pour tous les horizons
+
+Avant, le tri par ISIN et date se trouvait dans la boucle des dimensions. Douze dérivées d’une même variable entraînaient donc douze tris :
+
+```python
+for component, column in components:
+    if component != 'level':
+        ordered = pd.DataFrame({
+            '_position': np.arange(len(screen)),
+            '_isin': isin_values,
+            '_date': pd.to_datetime(screen['Date']).to_numpy(),
+            '_value': source_values.to_numpy(),
+        }).sort_values(['_isin', '_date'])
+
+        if base_dimension == 'pct':
+            filled_values = ordered.groupby('_isin')['_value'].ffill()
+            derived = filled_values.groupby(ordered['_isin']).pct_change(
+                periods=period,
+                fill_method=None,
+            )
+        else:
+            derived = ordered.groupby('_isin')['_value'].diff(period)
+        screen[column] = pd.Series(
+            derived.to_numpy(),
+            index=ordered['_position'],
+        ).sort_index().to_numpy()
+```
+
+Après, la table est ordonnée avant la boucle ; les groupes, le forward fill et le rang sont préparés une seule fois, puis tous les horizons sont produits ensemble :
+
+```python
+ordered = pd.DataFrame(ordered_data).sort_values(['_isin', '_date'])
+ordered_groups = ordered.groupby('_isin')
+filled_values = (
+    ordered_groups['_value'].ffill()
+    if any(dimension.startswith('pct_') for dimension in dimensions)
+    else None
+)
+
+derivatives = {}
+for dimension in dimensions:
+    base_dimension, period_text = dimension.rsplit('_', 1)
+    period = int(period_text)
+    if base_dimension == 'pct':
+        derived = filled_values.groupby(ordered['_isin']).pct_change(
+            periods=period,
+            fill_method=None,
+        )
+    elif base_dimension == 'rank_diff':
+        derived = ordered_groups['_rank_value'].diff(periods=period)
+    else:
+        derived = ordered_groups['_value'].diff(periods=period)
+    derivatives[f'{variable}__{dimension}'] = pd.Series(
+        derived.to_numpy(),
+        index=ordered['_position'],
+    ).sort_index().to_numpy()
+
+screen[list(derivatives)] = pd.DataFrame(derivatives, index=screen.index)
+```
+
+Effet mesuré : le nombre de tris passe de 120 à 10 dans la campagne profilée et le temps de création des dérivées passe de 41,40 s à 16,45 s.
+
+### 14.4 Calcul quotidien sans tables longues
+
+Avant, deux matrices complètes étaient transformées en tables longues, puis fusionnées avec le portefeuille :
+
+```python
+returns_drift_flat = (
+    returns_drift.stack().to_frame().reset_index()
+)
+returns_flat = (
+    df_returns.stack().to_frame().reset_index()
+)
+df_merge = df_merge.merge(
+    returns_drift_flat,
+    how='left',
+    on=[col_date, col_id],
+)
+df_merge = df_merge.merge(
+    returns_flat,
+    how='left',
+    on=[col_date, col_id],
+)
+```
+
+Après, les dates et les titres sont convertis en positions, puis les deux valeurs sont lues directement dans les matrices NumPy :
+
+```python
+date_positions = returns_drift.index.get_indexer(
+    pd.DatetimeIndex(df_merge[col_date]),
+)
+security_positions = returns_drift.columns.get_indexer(df_merge[col_id])
+valid_positions = (date_positions >= 0) & (security_positions >= 0)
+
+drift_values = np.full(len(df_merge), np.nan)
+return_values = np.full(len(df_merge), np.nan)
+drift_matrix = returns_drift.to_numpy(copy=False)
+return_matrix = df_returns.to_numpy(copy=False)
+drift_values[valid_positions] = drift_matrix[
+    date_positions[valid_positions],
+    security_positions[valid_positions],
+]
+return_values[valid_positions] = return_matrix[
+    date_positions[valid_positions],
+    security_positions[valid_positions],
+]
+```
+
+Effet mesuré conjointement avec les autres optimisations de la première passe : le test unitaire complet est passé de 62,02 s à 36,65 s, tandis que son pic additionnel est passé de 1 691,2 Mio à 616,0 Mio. La seconde passe l’a ensuite réduit à 11,52 s et 487,9 Mio.
+
+## 15. Synthèse consolidée des temps avant et après
+
+Le tableau suivant rassemble les trois générations mesurées avec le même historique réel et le même test `Revenue 5Y CAGR | level`. La colonne « initiale » précède la vectorisation du moteur ; la « première passe » correspond aux optimisations décrites dans les sections 2 à 5 ; la version « actuelle » ajoute le tri unique, les types compacts et le cache mensuel.
+
+| Étape | Version initiale | Première passe | Version actuelle | Gain initial → actuel |
+|---|---:|---:|---:|---:|
+| Chargement | 0,888 s | 0,791 s | 1,338 s | -50,7 % |
+| Benchmark | 10,187 s | 5,530 s | 3,140 s | **69,2 %** |
+| Premier signal complet | 62,021 s | 36,647 s | 11,520 s | **81,4 %** |
+| **Total mesuré** | **73,096 s** | **42,968 s** | **15,998 s** | **78,1 %** |
+
+Le chargement actuel est plus lent de 0,45 s que le chargement initial parce qu’il inclut la conversion vers les types compacts. Ce coût unique évite ensuite de conserver plus de 400 Mio supplémentaires pendant toute la campagne. Il ne faut donc pas l’interpréter isolément comme une régression globale.
+
+La lecture chronologique est la suivante :
+
+1. la première passe réduit le total de 73,10 s à 42,97 s, soit 41,2 % ;
+2. la seconde passe réduit encore ce total à 16,00 s, soit 62,8 % par rapport à la première passe ;
+3. le gain cumulé entre la version initiale et la version actuelle atteint 78,1 %, soit un temps divisé par environ 4,6.
+
+La mémoire suit la même tendance :
+
+| Mesure mémoire | Version initiale | Première passe | Version actuelle | Gain initial → actuel |
+|---|---:|---:|---:|---:|
+| Pic additionnel du chargement | 690,1 Mio | 616,8 Mio | 535,4 Mio | 22,4 % |
+| Pic additionnel du benchmark | 1 544,6 Mio | 1 011,6 Mio | 811,8 Mio | 47,4 % |
+| Pic additionnel du premier signal | 1 691,2 Mio | 616,0 Mio | 487,9 Mio | **71,2 %** |
+| Pic RSS absolu maximal | 2 458,7 Mio | 1 655,5 Mio | 1 261,8 Mio | **48,7 %** |
+
+Le profiling des dix variables et treize dimensions, présenté en section 10, utilise une fenêtre distincte de 130 072 lignes. Ses 41,40 s avant et 16,45 s après ne doivent donc pas être additionnées au total de 15,998 s ci-dessus : il s’agit d’une mesure ciblée destinée à isoler le coût de fabrication des colonnes dérivées.
+
+## 16. Limites et prochaines optimisations possibles
 
 Le coût restant est principalement concentré dans le calcul quotidien répété pour chaque signal et dans certaines opérations pandas historiques encore basées sur `groupby.apply()` ou sur des boucles de dates.
 
