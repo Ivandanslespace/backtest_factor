@@ -1,4 +1,5 @@
 import hashlib
+import json
 import tempfile
 import unittest
 import warnings
@@ -880,6 +881,18 @@ class TestExportCumulatif(unittest.TestCase):
             export_dir = Path(directory) / 'recherche'
             sources = func._load_saved_performances(export_dir)
             analysis = func.reconstruct_backtest_analysis(export_dir=export_dir)
+            exported_metrics = pd.read_csv(export_dir / 'backtest_metrics.csv')
+            legacy_files = [
+                export_dir / filename
+                for filename in (
+                    'backtest_summary.csv', 'signal_composition.csv',
+                    'classic_metrics.csv', 'period_metrics.csv',
+                    'metrics_by_period.csv',
+                )
+            ]
+            exported_ratio_files = list((export_dir / 'data').glob('*_ratios.csv'))
+            holdings_directory_exists = (export_dir / 'holdings').exists()
+            figures_directory_exists = (export_dir / 'figures').exists()
 
         self.assertEqual(
             unitary_only_analysis['summary']['test_path'].tolist(),
@@ -908,6 +921,28 @@ class TestExportCumulatif(unittest.TestCase):
         )
         self.assertEqual(analysis['summary']['test_path'].nunique(), 2)
         self.assertEqual(analysis['metrics_by_period']['test_path'].nunique(), 2)
+        self.assertSetEqual(
+            set(exported_metrics['test_path']), {unitary_path, composite_path},
+        )
+        self.assertSetEqual(
+            set(exported_metrics['scope']), {'total', 'subperiod'},
+        )
+        self.assertIn('composition_recipe', exported_metrics.columns)
+        self.assertIn('components_json', exported_metrics.columns)
+        self.assertTrue(exported_metrics.loc[
+            exported_metrics['test_path'] == composite_path,
+            'components_json',
+        ].notna().all())
+        composite_components = json.loads(exported_metrics.loc[
+            (exported_metrics['test_path'] == composite_path)
+            & (exported_metrics['scope'] == 'total'),
+            'components_json',
+        ].iloc[0])
+        self.assertEqual(len(composite_components), 2)
+        self.assertFalse(any(path.exists() for path in legacy_files))
+        self.assertFalse(exported_ratio_files)
+        self.assertFalse(holdings_directory_exists)
+        self.assertFalse(figures_directory_exists)
 
 
 class TestReconstructionPeriodes(unittest.TestCase):
