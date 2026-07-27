@@ -243,15 +243,26 @@ def _resolve_missingness_variables(families=None, variables=None):
 
 
 def assess_variable_missingness(screen, families=None, variables=None,
-                                threshold=None, date_col='Date'):
-    """Calcule les taux de données manquantes et filtre les variables éligibles."""
+                                threshold=None, date_col='Date',
+                                bench=DEFAULT_BENCHMARK):
+    """Calcule les données manquantes uniquement dans l'univers du benchmark."""
     if not isinstance(screen, pd.DataFrame):
         raise TypeError('screen doit être un DataFrame pandas.')
     if date_col not in screen.columns:
         raise KeyError(f'Colonne de date absente : {date_col}')
+    weight_column = f'Weight in {bench}'
+    if weight_column not in screen.columns:
+        raise KeyError(
+            f'Colonne requise absente pour définir l’univers : {weight_column}'
+        )
     selected_variables = _resolve_missingness_variables(families, variables)
     threshold_decimal = _normalise_missing_threshold(threshold)
-    dates = pd.to_datetime(screen[date_col], errors='coerce')
+    universe_screen = screen.loc[
+        pd.to_numeric(screen[weight_column], errors='coerce').fillna(0).gt(0)
+    ]
+    if universe_screen.empty:
+        raise ValueError(f'Aucune observation n’appartient à l’univers {bench}.')
+    dates = pd.to_datetime(universe_screen[date_col], errors='coerce')
     valid_dates = dates.notna()
     if not valid_dates.any():
         raise ValueError('Aucune date valide n’est disponible pour mesurer les données manquantes.')
@@ -268,7 +279,9 @@ def assess_variable_missingness(screen, families=None, variables=None,
     missing_by_date.index.name = date_col
     overall_missing = pd.Series(1.0, index=selected_variables, dtype=float)
     if available_variables:
-        missing_indicators = screen.loc[valid_dates, available_variables].isna().astype(float)
+        missing_indicators = universe_screen.loc[
+            valid_dates, available_variables
+        ].isna().astype(float)
         missing_indicators.index = dates.loc[valid_dates].to_numpy()
         missing_indicators.index.name = date_col
         missing_by_date = missing_indicators.groupby(level=0, sort=True).mean()
@@ -296,12 +309,14 @@ def assess_variable_missingness(screen, families=None, variables=None,
         'selected_variables': selected,
         'excluded_variables': excluded,
         'threshold_pct': None if threshold_decimal is None else threshold_decimal * 100.0,
+        'benchmark': bench,
+        'universe_observations': int(len(universe_screen)),
     }
 
 
 def plot_variable_missingness(screen, families=None, variables=None,
                               threshold=None, date_col='Date', title=None,
-                              show_plot=True):
+                              show_plot=True, bench=DEFAULT_BENCHMARK):
     """Trace les données manquantes par date et retourne la liste filtrée."""
     assessment = assess_variable_missingness(
         screen=screen,
@@ -309,6 +324,7 @@ def plot_variable_missingness(screen, families=None, variables=None,
         variables=variables,
         threshold=threshold,
         date_col=date_col,
+        bench=bench,
     )
     missing_by_date = assessment['missing_by_date']
     summary = assessment['summary'].set_index('variable')
@@ -346,6 +362,7 @@ def plot_variable_missingness(screen, families=None, variables=None,
                 (families,) if isinstance(families, str) else families,
             )
             title = f'{title} | {family_label}'
+        title = f'{title} | Univers : {bench}'
     figure.update_layout(
         title=title,
         width=1450,

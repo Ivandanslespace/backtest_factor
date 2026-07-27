@@ -131,11 +131,12 @@ def _assert_batches_exactly_equal(test_case, sequential, parallel):
 class TestChargementDonnees(unittest.TestCase):
     """Vérifie la projection des colonnes et la fenêtre historique chargée."""
 
-    def test_filtre_de_variables_par_donnees_manquantes(self):
+    def test_filtre_de_variables_par_donnees_manquantes_dans_univers(self):
         screen = pd.DataFrame({
             'Date': pd.to_datetime([
                 '2024-01-31', '2024-01-31', '2024-02-29', '2024-02-29',
             ]),
+            f'Weight in {func.DEFAULT_BENCHMARK}': [1.0, 0.0, 1.0, 0.0],
             'Signal fiable': [1.0, np.nan, 2.0, 3.0],
             'Signal incomplet': [np.nan, np.nan, 1.0, np.nan],
         })
@@ -147,7 +148,7 @@ class TestChargementDonnees(unittest.TestCase):
             result = func.plot_variable_missingness(
                 screen,
                 families='growth',
-                threshold=50,
+                threshold=40,
                 show_plot=False,
             )
 
@@ -156,20 +157,22 @@ class TestChargementDonnees(unittest.TestCase):
             result['excluded_variables'], ['Signal incomplet', 'Signal absent'],
         )
         summary = result['summary'].set_index('variable')
-        self.assertEqual(summary.loc['Signal fiable', 'missing_pct'], 25.0)
-        self.assertEqual(summary.loc['Signal incomplet', 'missing_pct'], 75.0)
+        self.assertEqual(summary.loc['Signal fiable', 'missing_pct'], 0.0)
+        self.assertEqual(summary.loc['Signal incomplet', 'missing_pct'], 50.0)
         self.assertEqual(summary.loc['Signal absent', 'missing_pct'], 100.0)
         self.assertEqual(summary.loc['Signal absent', 'selection_reason'], 'colonne absente')
-        self.assertEqual(result['threshold_pct'], 50.0)
+        self.assertEqual(result['threshold_pct'], 40.0)
+        self.assertEqual(result['universe_observations'], 2)
+        self.assertEqual(result['benchmark'], func.DEFAULT_BENCHMARK)
         self.assertEqual(len(result['figure'].data), 3)
 
         fraction_result = func.assess_variable_missingness(
             screen,
             variables=['Signal fiable', 'Signal incomplet'],
-            threshold=0.5,
+            threshold=0.4,
         )
         self.assertEqual(fraction_result['selected_variables'], ['Signal fiable'])
-        self.assertEqual(fraction_result['threshold_pct'], 50.0)
+        self.assertEqual(fraction_result['threshold_pct'], 40.0)
 
     def test_start_date_conserve_uniquement_le_lookback_demande(self):
         benchmark = 'STOXX EUROPE 600'
