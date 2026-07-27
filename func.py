@@ -24,6 +24,7 @@ from factor_config import (
     LEGACY_DIMENSION_ALIASES,
     LOWER_IS_BETTER,
     SIGNAL_DIMENSIONS,
+    factor_columns,
     signal_options,
 )
 
@@ -211,6 +212,161 @@ def load_backtest_data(screen_path, returns_path, variables=None, signal_config=
         f'{len(returns.columns)} colonnes de rendements du benchmark.'
     )
     return screen, returns
+
+
+def _normalise_missing_threshold(threshold):
+    """Convertit un seuil de 0-1 ou de 0-100 en pourcentage décimal."""
+    if threshold is None:
+        return None
+    threshold = float(threshold)
+    if 0.0 <= threshold <= 1.0:
+        return threshold
+    if 1.0 < threshold <= 100.0:
+        return threshold / 100.0
+    raise ValueError('Le seuil de données manquantes doit être compris entre 0 et 1 ou 0 et 100.')
+
+
+def _resolve_missingness_variables(families=None, variables=None):
+    """Résout une famille ou une liste explicite en variables uniques."""
+    if families is not None and variables is not None:
+        raise ValueError('Indiquez soit families, soit variables, mais pas les deux.')
+    if families is not None:
+        families = (families,) if isinstance(families, str) else tuple(families)
+        variables = factor_columns(*families)
+    if variables is None:
+        raise ValueError('Indiquez au moins une famille ou une liste de variables.')
+    variables = (variables,) if isinstance(variables, str) else tuple(variables)
+    selected = list(dict.fromkeys(str(variable) for variable in variables))
+    if not selected:
+        raise ValueError('La liste de variables est vide.')
+    return selected
+
+
+def assess_variable_missingness(screen, families=None, variables=None,
+                                threshold=None, date_col='Date'):
+    """Calcule les taux de données manquantes et filtre les variables éligibles."""
+    if not isinstance(screen, pd.DataFrame):
+        raise TypeError('screen doit être un DataFrame pandas.')
+    if date_col not in screen.columns:
+        raise KeyError(f'Colonne de date absente : {date_col}')
+    selected_variables = _resolve_missingness_variables(families, variables)
+    threshold_decimal = _normalise_missing_threshold(threshold)
+    dates = pd.to_datetime(screen[date_col], errors='coerce')
+    valid_dates = dates.notna()
+    if not valid_dates.any():
+        raise ValueError('Aucune date valide n’est disponible pour mesurer les données manquantes.')
+
+    available_variables = [
+        variable for variable in selected_variables if variable in screen.columns
+    ]
+    missing_variables = [
+        variable for variable in selected_variables if variable not in screen.columns
+    ]
+    missing_by_date = pd.DataFrame(index=pd.Index(
+        dates.loc[valid_dates].drop_duplicates().sort_values(), name=date_col,
+    ))
+    missing_by_date.index.name = date_col
+    overall_missing = pd.Series(1.0, index=selected_variables, dtype=float)
+    if available_variables:
+        missing_indicators = screen.loc[valid_dates, available_variables].isna().astype(float)
+        missing_indicators.index = dates.loc[valid_dates].to_numpy()
+        missing_indicators.index.name = date_col
+        missing_by_date = missing_indicators.groupby(level=0, sort=True).mean()
+        overall_missing.loc[available_variables] = missing_indicators.mean()
+    missing_by_date = missing_by_date.reindex(columns=selected_variables, fill_value=1.0)
+
+    summary = pd.DataFrame({
+        'variable': selected_variables,
+        'missing_pct': overall_missing.mul(100.0).to_numpy(),
+        'available': [variable not in missing_variables for variable in selected_variables],
+    })
+    summary['selected'] = summary['available']
+    if threshold_decimal is not None:
+        summary['selected'] &= summary['missing_pct'].le(threshold_decimal * 100.0)
+    summary['selection_reason'] = np.where(
+        ~summary['available'],
+        'colonne absente',
+        np.where(summary['selected'], 'retenue', 'seuil de données manquantes'),
+    )
+    selected = summary.loc[summary['selected'], 'variable'].tolist()
+    excluded = summary.loc[~summary['selected'], 'variable'].tolist()
+    return {
+        'missing_by_date': missing_by_date.mul(100.0),
+        'summary': summary.sort_values('missing_pct').reset_index(drop=True),
+        'selected_variables': selected,
+        'excluded_variables': excluded,
+        'threshold_pct': None if threshold_decimal is None else threshold_decimal * 100.0,
+    }
+
+
+def plot_variable_missingness(screen, families=None, variables=None,
+                              threshold=None, date_col='Date', title=None,
+                              show_plot=True):
+    """Trace les données manquantes par date et retourne la liste filtrée."""
+    assessment = assess_variable_missingness(
+        screen=screen,
+        families=families,
+        variables=variables,
+        threshold=threshold,
+        date_col=date_col,
+    )
+    missing_by_date = assessment['missing_by_date']
+    summary = assessment['summary'].set_index('variable')
+    selected_variables = set(assessment['selected_variables'])
+    figure = go.Figure()
+    for index, variable in enumerate(missing_by_date.columns):
+        selected = variable in selected_variables
+        figure.add_trace(go.Scatter(
+            x=missing_by_date.index,
+            y=missing_by_date[variable],
+            mode='lines',
+            name=f"{variable} | {'retenue' if selected else 'exclue'}",
+            line=dict(
+                color=qualitative.Alphabet[index % len(qualitative.Alphabet)],
+                dash='solid' if selected else 'dot',
+            ),
+            opacity=1.0 if selected else 0.45,
+            hovertemplate=(
+                f'{variable}<br>Date=%{{x|%Y-%m-%d}}<br>Données manquantes=%{{y:.1f}}%<extra></extra>'
+            ),
+        ))
+    threshold_pct = assessment['threshold_pct']
+    if threshold_pct is not None:
+        figure.add_hline(
+            y=threshold_pct,
+            line_dash='dash',
+            line_color='black',
+            annotation_text=f'Seuil : {threshold_pct:.1f}%',
+            annotation_position='top left',
+        )
+    if title is None:
+        title = 'Données manquantes par variable'
+        if families is not None:
+            family_label = ', '.join(
+                (families,) if isinstance(families, str) else families,
+            )
+            title = f'{title} | {family_label}'
+    figure.update_layout(
+        title=title,
+        width=1450,
+        height=900,
+        template='plotly_white',
+        hovermode='x unified',
+        legend=dict(
+            x=1.01,
+            xanchor='left',
+            y=1.0,
+            yanchor='top',
+            font=dict(size=9),
+            title=dict(text='Variables', font=dict(size=10)),
+        ),
+        margin=dict(r=420, t=90),
+        xaxis_title='Date',
+        yaxis=dict(title='Données manquantes', ticksuffix='%'),
+    )
+    if show_plot:
+        figure.show()
+    return {**assessment, 'figure': figure, 'summary': summary.reset_index()}
 
 
 def _backtest_inputs(screen, returns, metric, bench):
