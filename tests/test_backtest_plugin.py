@@ -11,7 +11,13 @@ import pandas as pd
 
 import func
 from BacktestEngine import PtfBuilder
-from factor_config import make_signal_config, make_signal_dimensions, signal_options
+from factor_config import (
+    FACTOR_FAMILIES,
+    factor_columns,
+    make_signal_config,
+    make_signal_dimensions,
+    signal_options,
+)
 
 
 def _screen_minimal():
@@ -191,6 +197,23 @@ class TestChargementDonnees(unittest.TestCase):
 
 class TestConfigurationSignaux(unittest.TestCase):
     """Vérifie les règles de direction et les configurations réellement utilisées."""
+
+    def test_catalogue_restreint_aux_sept_familles_canoniques(self):
+        self.assertEqual(tuple(FACTOR_FAMILIES), (
+            'growth', 'quality', 'value', 'momentum', 'lowvol', 'dividend', 'size',
+        ))
+        growth_variables = factor_columns('growth')
+        self.assertEqual(growth_variables, FACTOR_FAMILIES['growth'])
+        self.assertIn('Revenue 5Y CAGR', growth_variables)
+        self.assertNotIn('Net Debt to Ebit', growth_variables)
+        self.assertIn('Net Debt to Ebit', factor_columns('quality'))
+
+        all_variables = [
+            variable
+            for family_variables in FACTOR_FAMILIES.values()
+            for variable in family_variables
+        ]
+        self.assertEqual(len(all_variables), len(set(all_variables)))
 
     def test_liste_unitaire_detecte_automatiquement_la_direction(self):
         screen = _screen_minimal()
