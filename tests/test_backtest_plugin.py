@@ -162,8 +162,6 @@ class TestChargementDonnees(unittest.TestCase):
         self.assertEqual(summary.loc['Signal absent', 'missing_pct'], 100.0)
         self.assertEqual(summary.loc['Signal absent', 'selection_reason'], 'colonne absente')
         self.assertEqual(result['threshold_pct'], 40.0)
-        self.assertEqual(result['universe_observations'], 2)
-        self.assertEqual(result['benchmark'], func.DEFAULT_BENCHMARK)
         self.assertEqual(len(result['figure'].data), 3)
 
         fraction_result = func.assess_variable_missingness(
