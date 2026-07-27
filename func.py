@@ -37,7 +37,7 @@ except ImportError:
 GROUP_COLS = [' Benchmark ICB Supersector ', 'Date', 'Exchange Country Region']
 DEFAULT_BENCHMARK = 'STOXX EUROPE 600'
 DEFAULT_PERCENTILE = 0.13
-DEFAULT_START_DATE = '2010-01-01'
+DEFAULT_START_DATE = '2007-12-01'
 CLASSIC_METRIC_NAMES = (
     'total_return', 'annualized_return', 'annualized_volatility',
     'sharpe_ratio', 'max_drawdown', 'sortino_ratio',
@@ -48,10 +48,8 @@ CLASSIC_METRIC_COLUMNS = tuple(
     for portfolio in ('top', 'worst', 'bench')
     for metric in CLASSIC_METRIC_NAMES
 )
-# Ruptures recommandées pour un historique démarrant en 2010 :
-# 2020 pour la pandémie, 2022 pour le régime inflationniste et 2024 pour la normalisation.
-# Ajoutez 2009 si les données couvrent aussi la période précédant la crise financière.
-RECOMMENDED_PERIOD_BREAKPOINTS = [2020, 2022, 2024]
+# 2009 pour la crise financière, 2020 pour la pandémie, 2022 pour le régime inflationniste et 2024 pour la normalisation.
+RECOMMENDED_PERIOD_BREAKPOINTS = [2009, 2022]
 
 
 # Exemple de configuration : un poids strictement positif active la dimension ; zéro la désactive.
