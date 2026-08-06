@@ -869,17 +869,12 @@ def run_top_worst_backtest(screen, returns, metric, list_noire_path, bench=DEFAU
 _WORKER_CONTEXT = None
 
 
-def _validate_n_jobs(n_jobs):
-    """Valide le nombre de processus demandé."""
+def _worker_count(n_jobs, task_count):
+    """Valide puis borne le nombre de processus aux tâches disponibles."""
     if isinstance(n_jobs, bool) or not isinstance(n_jobs, int):
         raise TypeError('n_jobs doit être un entier strictement positif.')
     if n_jobs < 1:
         raise ValueError('n_jobs doit être supérieur ou égal à 1.')
-
-
-def _worker_count(n_jobs, task_count):
-    """Retourne le nombre de processus réellement nécessaire."""
-    _validate_n_jobs(n_jobs)
     return min(n_jobs, max(1, int(task_count)))
 
 
@@ -1059,7 +1054,6 @@ def test_unitary_signals(screen, returns, signal_config, list_noire_path,
                          dimensions=DEFAULT_SIGNAL_DIMENSIONS,
                          n_jobs=1, **backtest_options):
     """Teste séparément les dimensions et retourne un lot standardisé."""
-    _validate_n_jobs(n_jobs)
     backtest_options = _ensure_monthly_base_cache(backtest_options)
     if not isinstance(signal_config, dict):
         signal_config = {
@@ -1153,7 +1147,6 @@ def test_unitary_signals(screen, returns, signal_config, list_noire_path,
 def test_incremental_signals(screen, returns, baseline_config, candidate_config,
                              list_noire_path, n_jobs=1, **backtest_options):
     """Compare une base et ses candidats dans un lot standardisé."""
-    _validate_n_jobs(n_jobs)
     backtest_options = _ensure_monthly_base_cache(backtest_options)
     baseline_config = _resolve_signal_config(screen, baseline_config)
     results = {}
@@ -1219,7 +1212,6 @@ def test_composite_signal(screen, returns, score_col, signal_config,
                           list_noire_path, test_name=None, n_jobs=1,
                           **backtest_options):
     """Construit un seul composite et retourne un lot standardisé."""
-    _validate_n_jobs(n_jobs)
     backtest_options = _ensure_monthly_base_cache(backtest_options)
     signal_config = _resolve_signal_config(screen, signal_config)
     scored_screen = calculate_composite_score(screen, score_col, signal_config)
@@ -1248,7 +1240,6 @@ def test_composite_signals(screen, returns, composite_configs, list_noire_path,
                            score_prefix='Score_Composite', n_jobs=1,
                            **backtest_options):
     """Construit et teste plusieurs recettes composites indépendantes."""
-    _validate_n_jobs(n_jobs)
     backtest_options = _ensure_monthly_base_cache(backtest_options)
     if not isinstance(composite_configs, dict) or not composite_configs:
         raise ValueError('Ajoutez au moins une configuration composite nommée.')
