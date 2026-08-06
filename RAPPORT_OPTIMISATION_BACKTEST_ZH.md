@@ -465,11 +465,11 @@ for variable in signal_config:
 ```python
 with ProcessPoolExecutor(
     max_workers=worker_count,
-    initializer=_initialize_parallel_backtest_worker,
+    initializer=_init_worker_context,
     initargs=(screen, returns, list_noire_path, execution_options),
 ) as executor:
     ordered_results = list(
-        executor.map(_execute_parallel_backtest_task, signal_tasks)
+        executor.map(_run_worker_signal, signal_tasks)
     )
 ```
 

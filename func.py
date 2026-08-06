@@ -866,26 +866,30 @@ def run_top_worst_backtest(screen, returns, metric, list_noire_path, bench=DEFAU
     return result
 
 
-_PARALLEL_BACKTEST_CONTEXT = None
+_WORKER_CONTEXT = None
 
 
-def _resolve_n_jobs(n_jobs, task_count):
-    """Valide le nombre de processus et le borne au nombre de tâches."""
+def _validate_n_jobs(n_jobs):
+    """Valide le nombre de processus demandé."""
     if isinstance(n_jobs, bool) or not isinstance(n_jobs, int):
         raise TypeError('n_jobs doit être un entier strictement positif.')
     if n_jobs < 1:
         raise ValueError('n_jobs doit être supérieur ou égal à 1.')
+
+
+def _worker_count(n_jobs, task_count):
+    """Retourne le nombre de processus réellement nécessaire."""
+    _validate_n_jobs(n_jobs)
     return min(n_jobs, max(1, int(task_count)))
 
 
-def _execute_backtest_task(screen, returns, task, list_noire_path,
-                           backtest_options):
+def _run_one_signal(screen, returns, task, list_noire_path, backtest_options):
     """Calcule éventuellement un score temporaire puis exécute son backtest."""
     metric = task['metric']
     score_specification = task.get('score_specification')
-    task_screen = screen
+    signal_screen = screen
     if score_specification is not None:
-        task_screen = calculate_composite_score(
+        signal_screen = calculate_composite_score(
             screen,
             metric,
             score_specification['signal_config'],
@@ -898,7 +902,7 @@ def _execute_backtest_task(screen, returns, task, list_noire_path,
         )
     try:
         return run_top_worst_backtest(
-            task_screen,
+            signal_screen,
             returns,
             metric,
             list_noire_path,
@@ -906,26 +910,25 @@ def _execute_backtest_task(screen, returns, task, list_noire_path,
             **backtest_options,
         )
     finally:
-        if task.get('drop_metric') and metric in task_screen.columns:
-            task_screen.drop(columns=[metric], inplace=True)
+        if task.get('drop_metric') and metric in signal_screen.columns:
+            signal_screen.drop(columns=[metric], inplace=True)
 
 
-def _parallel_progress_disabled(iterable, **kwargs):
+def _disable_parallel_progress(iterable, **kwargs):
     """Supprime les barres mensuelles concurrentes dans les workers."""
     return iterable
 
 
-def _initialize_parallel_backtest_worker(screen, returns, list_noire_path,
-                                         backtest_options):
+def _init_worker_context(screen, returns, list_noire_path, backtest_options):
     """Installe une seule copie des données dans chaque processus de travail."""
-    global _PARALLEL_BACKTEST_CONTEXT
+    global _WORKER_CONTEXT
     import tqdm as tqdm_module
-    tqdm_module.tqdm = _parallel_progress_disabled
+    tqdm_module.tqdm = _disable_parallel_progress
     worker_options = dict(backtest_options)
     monthly_base_cache = worker_options.get('monthly_base_cache')
     if isinstance(monthly_base_cache, dict):
         monthly_base_cache['_source_id'] = id(screen)
-    _PARALLEL_BACKTEST_CONTEXT = {
+    _WORKER_CONTEXT = {
         'screen': screen,
         'returns': returns,
         'list_noire_path': list_noire_path,
@@ -933,12 +936,12 @@ def _initialize_parallel_backtest_worker(screen, returns, list_noire_path,
     }
 
 
-def _execute_parallel_backtest_task(task):
+def _run_worker_signal(task):
     """Exécute une tâche avec les données initialisées dans le processus."""
-    context = _PARALLEL_BACKTEST_CONTEXT
+    context = _WORKER_CONTEXT
     if context is None:
         raise RuntimeError('Le contexte parallèle du backtest n’est pas initialisé.')
-    return _execute_backtest_task(
+    return _run_one_signal(
         context['screen'],
         context['returns'],
         task,
@@ -947,19 +950,28 @@ def _execute_parallel_backtest_task(task):
     )
 
 
-def _run_signal_backtest_tasks(screen, returns, tasks, list_noire_path,
-                               backtest_options, n_jobs):
-    """Exécute des signaux en ordre stable, séquentiellement ou par processus."""
-    if not tasks:
-        return []
-    resolved_n_jobs = _resolve_n_jobs(n_jobs, len(tasks))
-    if resolved_n_jobs == 1:
-        return [
-            _execute_backtest_task(
-                screen, returns, task, list_noire_path, backtest_options,
-            )
-            for task in tasks
-        ]
+def _run_sequential_signals(screen, returns, tasks, list_noire_path,
+                            backtest_options):
+    """Exécute les signaux dans le processus appelant."""
+    return [
+        _run_one_signal(
+            screen, returns, task, list_noire_path, backtest_options,
+        )
+        for task in tasks
+    ]
+
+
+def _show_signal_figures(results):
+    """Affiche les figures après la fin des processus de travail."""
+    for result in results:
+        figure = result.get('figure')
+        if figure is not None:
+            figure.show()
+
+
+def _run_parallel_signals(screen, returns, tasks, list_noire_path,
+                          backtest_options, worker_count):
+    """Exécute les signaux dans plusieurs processus et garde leur ordre."""
     if backtest_options.get('retain_builders'):
         raise ValueError(
             'retain_builders=True n’est pas compatible avec n_jobs > 1. '
@@ -988,7 +1000,7 @@ def _run_signal_backtest_tasks(screen, returns, tasks, list_noire_path,
     remaining_tasks = list(tasks)
     if not cache_is_ready:
         completed_results.append(
-            _execute_backtest_task(
+            _run_one_signal(
                 screen,
                 returns,
                 remaining_tasks.pop(0),
@@ -998,14 +1010,14 @@ def _run_signal_backtest_tasks(screen, returns, tasks, list_noire_path,
         )
 
     if remaining_tasks:
-        worker_count = min(resolved_n_jobs, len(remaining_tasks))
+        actual_worker_count = min(worker_count, len(remaining_tasks))
         print(
             f'Exécution parallèle de {len(remaining_tasks)} signaux '
-            f'avec {worker_count} processus.'
+            f'avec {actual_worker_count} processus.'
         )
         with ProcessPoolExecutor(
-            max_workers=worker_count,
-            initializer=_initialize_parallel_backtest_worker,
+            max_workers=actual_worker_count,
+            initializer=_init_worker_context,
             initargs=(
                 screen,
                 returns,
@@ -1014,23 +1026,40 @@ def _run_signal_backtest_tasks(screen, returns, tasks, list_noire_path,
             ),
         ) as executor:
             completed_results.extend(
-                executor.map(_execute_parallel_backtest_task, remaining_tasks)
+                executor.map(_run_worker_signal, remaining_tasks)
             )
         print('Exécution parallèle terminée.')
 
     if show_plot:
-        for result in completed_results:
-            figure = result.get('figure')
-            if figure is not None:
-                figure.show()
+        _show_signal_figures(completed_results)
     return completed_results
+
+
+def _run_signal_tasks(screen, returns, tasks, list_noire_path,
+                      backtest_options, n_jobs):
+    """Exécute les signaux séquentiellement ou par processus."""
+    if not tasks:
+        return []
+    worker_count = _worker_count(n_jobs, len(tasks))
+    if worker_count == 1:
+        return _run_sequential_signals(
+            screen, returns, tasks, list_noire_path, backtest_options,
+        )
+    return _run_parallel_signals(
+        screen,
+        returns,
+        tasks,
+        list_noire_path,
+        backtest_options,
+        worker_count,
+    )
 
 
 def test_unitary_signals(screen, returns, signal_config, list_noire_path,
                          dimensions=DEFAULT_SIGNAL_DIMENSIONS,
                          n_jobs=1, **backtest_options):
     """Teste séparément les dimensions et retourne un lot standardisé."""
-    _resolve_n_jobs(n_jobs, 1)
+    _validate_n_jobs(n_jobs)
     backtest_options = _ensure_monthly_base_cache(backtest_options)
     if not isinstance(signal_config, dict):
         signal_config = {
@@ -1106,7 +1135,7 @@ def test_unitary_signals(screen, returns, signal_config, list_noire_path,
                 },
             })
 
-    task_results = _run_signal_backtest_tasks(
+    task_results = _run_signal_tasks(
         working_screen,
         returns,
         tasks,
@@ -1124,7 +1153,7 @@ def test_unitary_signals(screen, returns, signal_config, list_noire_path,
 def test_incremental_signals(screen, returns, baseline_config, candidate_config,
                              list_noire_path, n_jobs=1, **backtest_options):
     """Compare une base et ses candidats dans un lot standardisé."""
-    _resolve_n_jobs(n_jobs, 1)
+    _validate_n_jobs(n_jobs)
     backtest_options = _ensure_monthly_base_cache(backtest_options)
     baseline_config = _resolve_signal_config(screen, baseline_config)
     results = {}
@@ -1171,7 +1200,7 @@ def test_incremental_signals(screen, returns, baseline_config, candidate_config,
             },
         })
 
-    task_results = _run_signal_backtest_tasks(
+    task_results = _run_signal_tasks(
         working_screen,
         returns,
         tasks,
@@ -1190,7 +1219,7 @@ def test_composite_signal(screen, returns, score_col, signal_config,
                           list_noire_path, test_name=None, n_jobs=1,
                           **backtest_options):
     """Construit un seul composite et retourne un lot standardisé."""
-    _resolve_n_jobs(n_jobs, 1)
+    _validate_n_jobs(n_jobs)
     backtest_options = _ensure_monthly_base_cache(backtest_options)
     signal_config = _resolve_signal_config(screen, signal_config)
     scored_screen = calculate_composite_score(screen, score_col, signal_config)
@@ -1204,7 +1233,7 @@ def test_composite_signal(screen, returns, score_col, signal_config,
             'components': describe_signal_config(signal_config, role='composite'),
         },
     }
-    backtest_result = _run_signal_backtest_tasks(
+    backtest_result = _run_signal_tasks(
         scored_screen,
         returns,
         [task],
@@ -1219,7 +1248,7 @@ def test_composite_signals(screen, returns, composite_configs, list_noire_path,
                            score_prefix='Score_Composite', n_jobs=1,
                            **backtest_options):
     """Construit et teste plusieurs recettes composites indépendantes."""
-    _resolve_n_jobs(n_jobs, 1)
+    _validate_n_jobs(n_jobs)
     backtest_options = _ensure_monthly_base_cache(backtest_options)
     if not isinstance(composite_configs, dict) or not composite_configs:
         raise ValueError('Ajoutez au moins une configuration composite nommée.')
@@ -1250,7 +1279,7 @@ def test_composite_signals(screen, returns, composite_configs, list_noire_path,
             },
         })
 
-    task_results = _run_signal_backtest_tasks(
+    task_results = _run_signal_tasks(
         working_screen,
         returns,
         tasks,
