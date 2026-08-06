@@ -869,15 +869,6 @@ def run_top_worst_backtest(screen, returns, metric, list_noire_path, bench=DEFAU
 _WORKER_CONTEXT = None
 
 
-def _worker_count(n_jobs, task_count):
-    """Valide puis borne le nombre de processus aux tâches disponibles."""
-    if isinstance(n_jobs, bool) or not isinstance(n_jobs, int):
-        raise TypeError('n_jobs doit être un entier strictement positif.')
-    if n_jobs < 1:
-        raise ValueError('n_jobs doit être supérieur ou égal à 1.')
-    return min(n_jobs, max(1, int(task_count)))
-
-
 def _run_one_signal(screen, returns, task, list_noire_path, backtest_options):
     """Calcule éventuellement un score temporaire puis exécute son backtest."""
     metric = task['metric']
@@ -1035,7 +1026,11 @@ def _run_signal_tasks(screen, returns, tasks, list_noire_path,
     """Exécute les signaux séquentiellement ou par processus."""
     if not tasks:
         return []
-    worker_count = _worker_count(n_jobs, len(tasks))
+    if isinstance(n_jobs, bool) or not isinstance(n_jobs, int):
+        raise TypeError('n_jobs doit être un entier strictement positif.')
+    if n_jobs < 1:
+        raise ValueError('n_jobs doit être supérieur ou égal à 1.')
+    worker_count = min(n_jobs, len(tasks))
     if worker_count == 1:
         return _run_sequential_signals(
             screen, returns, tasks, list_noire_path, backtest_options,
